@@ -126,7 +126,7 @@ func UnsecuredKubeletDeps(s *options.KubeletServer) (*kubelet.KubeletDeps, error
 
 	var dockerClient dockertools.DockerInterface
 	if s.ContainerRuntime == "docker" {
-		dockerClient = dockertools.ConnectToDockerOrDie(s.DockerEndpoint, s.RuntimeRequestTimeout.Duration)
+		dockerClient = dockertools.CreateDockerClientOrDie(s.DockerEndpoint, s.RuntimeRequestTimeout.Duration)
 	} else {
 		dockerClient = nil
 	}
@@ -298,7 +298,7 @@ func initConfigz(kc *componentconfig.KubeletConfiguration) (*configz.Config, err
 
 func run(s *options.KubeletServer, kubeDeps *kubelet.KubeletDeps) (err error) {
 	// TODO: this should be replaced by a --standalone flag
-	standaloneMode := (len(s.APIServerList) == 0)
+	standaloneMode := (len(s.APIServerList) == 0 && !s.RequireKubeConfig)
 
 	if s.ExitOnLockContention && s.LockFilePath == "" {
 		return errors.New("cannot exit on lock file contention: no lock file specified")

@@ -48,6 +48,19 @@ func (b containersByID) Len() int           { return len(b) }
 func (b containersByID) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
 func (b containersByID) Less(i, j int) bool { return b[i].ID.ID < b[j].ID.ID }
 
+// Newest first.
+type podSandboxByCreated []*runtimeApi.PodSandbox
+
+func (p podSandboxByCreated) Len() int           { return len(p) }
+func (p podSandboxByCreated) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+func (p podSandboxByCreated) Less(i, j int) bool { return p[i].GetCreatedAt() > p[j].GetCreatedAt() }
+
+type containerStatusByCreated []*kubecontainer.ContainerStatus
+
+func (c containerStatusByCreated) Len() int           { return len(c) }
+func (c containerStatusByCreated) Swap(i, j int)      { c[i], c[j] = c[j], c[i] }
+func (c containerStatusByCreated) Less(i, j int) bool { return c[i].CreatedAt.After(c[j].CreatedAt) }
+
 // toKubeContainerState converts runtimeApi.ContainerState to kubecontainer.ContainerState.
 func toKubeContainerState(state runtimeApi.ContainerState) kubecontainer.ContainerState {
 	switch state {
@@ -61,6 +74,21 @@ func toKubeContainerState(state runtimeApi.ContainerState) kubecontainer.Contain
 		return kubecontainer.ContainerStateUnknown
 	}
 
+	return kubecontainer.ContainerStateUnknown
+}
+
+// sandboxToKubeContainerState converts runtimeApi.PodSandboxState to
+// kubecontainer.ContainerState.
+// This is only needed because we need to return sandboxes as if they were
+// kubecontainer.Containers to avoid substantial changes to PLEG.
+// TODO: Remove this once it becomes obsolete.
+func sandboxToKubeContainerState(state runtimeApi.PodSandBoxState) kubecontainer.ContainerState {
+	switch state {
+	case runtimeApi.PodSandBoxState_READY:
+		return kubecontainer.ContainerStateRunning
+	case runtimeApi.PodSandBoxState_NOTREADY:
+		return kubecontainer.ContainerStateExited
+	}
 	return kubecontainer.ContainerStateUnknown
 }
 
@@ -91,6 +119,21 @@ func (m *kubeGenericRuntimeManager) toKubeContainer(c *runtimeApi.Container) (*k
 		Image: c.Image.GetImage(),
 		Hash:  annotatedInfo.Hash,
 		State: toKubeContainerState(c.GetState()),
+	}, nil
+}
+
+// sandboxToKubeContainer converts runtimeApi.PodSandbox to kubecontainer.Container.
+// This is only needed because we need to return sandboxes as if they were
+// kubecontainer.Containers to avoid substantial changes to PLEG.
+// TODO: Remove this once it becomes obsolete.
+func (m *kubeGenericRuntimeManager) sandboxToKubeContainer(s *runtimeApi.PodSandbox) (*kubecontainer.Container, error) {
+	if s == nil || s.Id == nil || s.State == nil {
+		return nil, fmt.Errorf("unable to convert a nil pointer to a runtime container")
+	}
+
+	return &kubecontainer.Container{
+		ID:    kubecontainer.ContainerID{Type: m.runtimeName, ID: s.GetId()},
+		State: sandboxToKubeContainerState(s.GetState()),
 	}, nil
 }
 

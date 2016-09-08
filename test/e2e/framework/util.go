@@ -1689,7 +1689,7 @@ func (r podProxyResponseChecker) CheckAllResponses() (done bool, err error) {
 				Raw()
 		}
 		if err != nil {
-			Logf("Controller %s: Failed to GET from replica %d [%s]: %v:", r.controllerName, i+1, pod.Name, err)
+			Logf("Controller %s: Failed to GET from replica %d [%s]: %v\npod status: %#v", r.controllerName, i+1, pod.Name, err, pod.Status)
 			continue
 		}
 		// The response checker expects the pod's name unless !respondName, in
@@ -4201,7 +4201,7 @@ func allowedNotReadyReasons(nodes []*api.Node) bool {
 	for _, node := range nodes {
 		index, condition := api.GetNodeCondition(&node.Status, api.NodeReady)
 		if index == -1 ||
-			!strings.Contains(condition.Reason, "could not locate kubenet required CNI plugins") {
+			!strings.Contains(condition.Message, "could not locate kubenet required CNI plugins") {
 			return false
 		}
 	}
@@ -4213,7 +4213,7 @@ func allowedNotReadyReasons(nodes []*api.Node) bool {
 // and figure out how to do it in a configurable way, as we can't expect all setups to run
 // default test add-ons.
 func AllNodesReady(c *client.Client, timeout time.Duration) error {
-	Logf("Waiting up to %v for all nodes to be ready", timeout)
+	Logf("Waiting up to %v for all (but %d) nodes to be ready", TestContext.AllowedNotReadyNodes, timeout)
 
 	var notReady []*api.Node
 	err := wait.PollImmediate(Poll, timeout, func() (bool, error) {

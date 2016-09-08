@@ -24,6 +24,7 @@ import (
 
 	"github.com/coreos/go-semver/semver"
 	"github.com/golang/glog"
+
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/client/record"
 	"k8s.io/kubernetes/pkg/credentialprovider"
@@ -229,20 +230,40 @@ func (m *kubeGenericRuntimeManager) GetPods(all bool) ([]*kubecontainer.Pod, err
 	if err != nil {
 		return nil, err
 	}
-	for _, s := range sandboxes {
-		podUID := kubetypes.UID(s.Metadata.GetUid())
-		pods[podUID] = &kubecontainer.Pod{
-			ID:        podUID,
-			Name:      s.Metadata.GetName(),
-			Namespace: s.Metadata.GetNamespace(),
+	for i := range sandboxes {
+		s := sandboxes[i]
+		if s.Metadata == nil {
+			glog.V(4).Infof("Sandbox does not have metadata: %+v", s)
+			continue
 		}
+		podUID := kubetypes.UID(s.Metadata.GetUid())
+		if _, ok := pods[podUID]; !ok {
+			pods[podUID] = &kubecontainer.Pod{
+				ID:        podUID,
+				Name:      s.Metadata.GetName(),
+				Namespace: s.Metadata.GetNamespace(),
+			}
+		}
+		p := pods[podUID]
+		converted, err := m.sandboxToKubeContainer(s)
+		if err != nil {
+			glog.V(4).Infof("Convert %q sandbox %v of pod %q failed: %v", m.runtimeName, s, podUID, err)
+			continue
+		}
+		p.Sandboxes = append(p.Sandboxes, converted)
 	}
 
 	containers, err := m.getKubeletContainers(all)
 	if err != nil {
 		return nil, err
 	}
-	for _, c := range containers {
+	for i := range containers {
+		c := containers[i]
+		if c.Metadata == nil {
+			glog.V(4).Infof("Container does not have metadata: %+v", c)
+			continue
+		}
+
 		labelledInfo := getContainerInfoFromLabels(c.Labels)
 		pod, found := pods[labelledInfo.PodUID]
 		if !found {
@@ -256,7 +277,7 @@ func (m *kubeGenericRuntimeManager) GetPods(all bool) ([]*kubecontainer.Pod, err
 
 		converted, err := m.toKubeContainer(c)
 		if err != nil {
-			glog.Warningf("Convert %s container %v of pod %q failed: %v", m.runtimeName, c, labelledInfo.PodUID, err)
+			glog.V(4).Infof("Convert %s container %v of pod %q failed: %v", m.runtimeName, c, labelledInfo.PodUID, err)
 			continue
 		}
 
@@ -292,7 +313,58 @@ func (m *kubeGenericRuntimeManager) KillPod(pod *api.Pod, runningPod kubecontain
 // GetPodStatus retrieves the status of the pod, including the
 // information of all containers in the pod that are visble in Runtime.
 func (m *kubeGenericRuntimeManager) GetPodStatus(uid kubetypes.UID, name, namespace string) (*kubecontainer.PodStatus, error) {
-	return nil, fmt.Errorf("not implemented")
+	// Now we retain restart count of container as a container label. Each time a container
+	// restarts, pod will read the restart count from the registered dead container, increment
+	// it to get the new restart count, and then add a label with the new restart count on
+	// the newly started container.
+	// However, there are some limitations of this method:
+	//	1. When all dead containers were garbage collected, the container status could
+	//	not get the historical value and would be *inaccurate*. Fortunately, the chance
+	//	is really slim.
+	//	2. When working with old version containers which have no restart count label,
+	//	we can only assume their restart count is 0.
+	// Anyhow, we only promised "best-effort" restart count reporting, we can just ignore
+	// these limitations now.
+	// TODO: move this comment to SyncPod.
+	podFullName := kubecontainer.BuildPodFullName(name, namespace)
+	podSandboxIDs, err := m.getSandboxIDByPodUID(string(uid), nil)
+	if err != nil {
+		return nil, err
+	}
+	glog.V(4).Infof("getSandboxIDByPodUID got sandbox IDs %q for pod %q(UID:%q)", podSandboxIDs, podFullName, string(uid))
+
+	sandboxStatuses := make([]*runtimeApi.PodSandboxStatus, len(podSandboxIDs))
+	containerStatuses := []*kubecontainer.ContainerStatus{}
+	podIP := ""
+	for idx, podSandboxID := range podSandboxIDs {
+		podSandboxStatus, err := m.runtimeService.PodSandboxStatus(podSandboxID)
+		if err != nil {
+			glog.Errorf("PodSandboxStatus for pod (uid:%v, name:%s, namespace:%s) error: %v", uid, name, namespace, err)
+			return nil, err
+		}
+		sandboxStatuses[idx] = podSandboxStatus
+
+		// Only get pod IP from latest sandbox
+		if idx == 0 && podSandboxStatus.GetState() == runtimeApi.PodSandBoxState_READY {
+			podIP = m.determinePodSandboxIP(namespace, name, podSandboxStatus)
+		}
+
+		containerStatus, err := m.getKubeletContainerStatuses(podSandboxID)
+		if err != nil {
+			glog.Errorf("getKubeletContainerStatuses for sandbox %s failed: %v", podSandboxID, err)
+			return nil, err
+		}
+		containerStatuses = append(containerStatuses, containerStatus...)
+	}
+
+	return &kubecontainer.PodStatus{
+		ID:                uid,
+		Name:              name,
+		Namespace:         namespace,
+		IP:                podIP,
+		SandboxStatuses:   sandboxStatuses,
+		ContainerStatuses: containerStatuses,
+	}, nil
 }
 
 // Returns the filesystem path of the pod's network namespace; if the

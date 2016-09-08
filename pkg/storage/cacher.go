@@ -161,6 +161,9 @@ type Cacher struct {
 	watcherIdx int
 	watchers   indexedWatchers
 
+	// Incoming events that should be dispatched to watchers.
+	incoming chan watchCacheEvent
+
 	// Handling graceful termination.
 	stopLock sync.RWMutex
 	stopped  bool
@@ -197,6 +200,8 @@ func NewCacherFromConfig(config CacherConfig) *Cacher {
 			allWatchers:   make(map[int]*cacheWatcher),
 			valueWatchers: make(map[string]watchersMap),
 		},
+		// TODO: Figure out the correct value for the buffer size.
+		incoming: make(chan watchCacheEvent, 100),
 		// We need to (potentially) stop both:
 		// - wait.Until go-routine
 		// - reflector.ListAndWatch
@@ -205,6 +210,7 @@ func NewCacherFromConfig(config CacherConfig) *Cacher {
 		stopCh: make(chan struct{}),
 	}
 	watchCache.SetOnEvent(cacher.processEvent)
+	go cacher.dispatchEvents()
 
 	stopCh := cacher.stopCh
 	cacher.stopWg.Add(1)
@@ -404,7 +410,25 @@ func (c *Cacher) triggerValues(event *watchCacheEvent) ([]string, bool) {
 }
 
 func (c *Cacher) processEvent(event watchCacheEvent) {
-	triggerValues, supported := c.triggerValues(&event)
+	c.incoming <- event
+}
+
+func (c *Cacher) dispatchEvents() {
+	for {
+		select {
+		case event, ok := <-c.incoming:
+			if !ok {
+				return
+			}
+			c.dispatchEvent(&event)
+		case <-c.stopCh:
+			return
+		}
+	}
+}
+
+func (c *Cacher) dispatchEvent(event *watchCacheEvent) {
+	triggerValues, supported := c.triggerValues(event)
 
 	c.Lock()
 	defer c.Unlock()
@@ -608,10 +632,10 @@ func (c *cacheWatcher) stop() {
 
 var timerPool sync.Pool
 
-func (c *cacheWatcher) add(event watchCacheEvent) {
+func (c *cacheWatcher) add(event *watchCacheEvent) {
 	// Try to send the event immediately, without blocking.
 	select {
-	case c.input <- event:
+	case c.input <- *event:
 		return
 	default:
 	}
@@ -619,6 +643,7 @@ func (c *cacheWatcher) add(event watchCacheEvent) {
 	// OK, block sending, but only for up to 5 seconds.
 	// cacheWatcher.add is called very often, so arrange
 	// to reuse timers instead of constantly allocating.
+	startTime := time.Now()
 	const timeout = 5 * time.Second
 	t, ok := timerPool.Get().(*time.Timer)
 	if ok {
@@ -629,7 +654,7 @@ func (c *cacheWatcher) add(event watchCacheEvent) {
 	defer timerPool.Put(t)
 
 	select {
-	case c.input <- event:
+	case c.input <- *event:
 		stopped := t.Stop()
 		if !stopped {
 			// Consume triggered (but not yet received) timer event
@@ -643,6 +668,8 @@ func (c *cacheWatcher) add(event watchCacheEvent) {
 		c.forget(false)
 		c.stop()
 	}
+	glog.V(2).Infof("cacheWatcher add function blocked processing of %v for %v",
+		reflect.TypeOf(event.Object).String(), time.Since(startTime))
 }
 
 func (c *cacheWatcher) sendWatchCacheEvent(event watchCacheEvent) {

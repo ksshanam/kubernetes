@@ -172,7 +172,46 @@ func TestContainerRuntimeType(t *testing.T) {
 	assert.NoError(t, err)
 
 	runtimeType := m.Type()
-	assert.Equal(t, "fakeRuntime", runtimeType)
+	assert.Equal(t, apitest.FakeRuntimeName, runtimeType)
+}
+
+func TestGetPodStatus(t *testing.T) {
+	fakeRuntime, _, m, err := createTestRuntimeManager()
+	assert.NoError(t, err)
+
+	containers := []api.Container{
+		{
+			Name:            "foo1",
+			Image:           "busybox",
+			ImagePullPolicy: api.PullIfNotPresent,
+		},
+		{
+			Name:            "foo2",
+			Image:           "busybox",
+			ImagePullPolicy: api.PullIfNotPresent,
+		},
+	}
+	pod := &api.Pod{
+		ObjectMeta: api.ObjectMeta{
+			UID:       "12345678",
+			Name:      "foo",
+			Namespace: "new",
+		},
+		Spec: api.PodSpec{
+			Containers: containers,
+		},
+	}
+
+	// Set fake sandbox and faked containers to fakeRuntime.
+	_, _, err = makeAndSetFakePod(m, fakeRuntime, pod)
+	assert.NoError(t, err)
+
+	podStatus, err := m.GetPodStatus(pod.UID, pod.Name, pod.Namespace)
+	assert.NoError(t, err)
+	assert.Equal(t, pod.UID, podStatus.ID)
+	assert.Equal(t, pod.Name, podStatus.Name)
+	assert.Equal(t, pod.Namespace, podStatus.Namespace)
+	assert.Equal(t, apitest.FakePodSandboxIP, podStatus.IP)
 }
 
 func TestGetPods(t *testing.T) {
@@ -200,7 +239,7 @@ func TestGetPods(t *testing.T) {
 	}
 
 	// Set fake sandbox and fake containers to fakeRuntime.
-	_, fakeContainers, err := makeAndSetFakePod(m, fakeRuntime, pod)
+	fakeSandbox, fakeContainers, err := makeAndSetFakePod(m, fakeRuntime, pod)
 	assert.NoError(t, err)
 
 	// Convert the fakeContainers to kubecontainer.Container
@@ -220,12 +259,25 @@ func TestGetPods(t *testing.T) {
 		}
 		containers[i] = c
 	}
+	// Convert fakeSandbox to kubecontainer.Container
+	sandbox, err := m.sandboxToKubeContainer(&runtimeApi.PodSandbox{
+		Id:        fakeSandbox.Id,
+		Metadata:  fakeSandbox.Metadata,
+		State:     fakeSandbox.State,
+		CreatedAt: fakeSandbox.CreatedAt,
+		Labels:    fakeSandbox.Labels,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
 	expected := []*kubecontainer.Pod{
 		{
 			ID:         kubetypes.UID("12345678"),
 			Name:       "foo",
 			Namespace:  "new",
 			Containers: []*kubecontainer.Container{containers[0], containers[1]},
+			Sandboxes:  []*kubecontainer.Container{sandbox},
 		},
 	}
 
