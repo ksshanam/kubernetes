@@ -22,16 +22,15 @@ import (
 	"sync"
 	"time"
 
-	federation_api "k8s.io/kubernetes/federation/apis/federation/v1beta1"
-	federation_release_1_4 "k8s.io/kubernetes/federation/client/clientset_generated/federation_release_1_4"
-	api "k8s.io/kubernetes/pkg/api"
-	api_v1 "k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/client/cache"
-	kube_release_1_4 "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_4"
-	"k8s.io/kubernetes/pkg/client/restclient"
-	"k8s.io/kubernetes/pkg/controller/framework"
-	pkg_runtime "k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/watch"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	pkgruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	federationapi "k8s.io/kubernetes/federation/apis/federation/v1beta1"
+	federationclientset "k8s.io/kubernetes/federation/client/clientset_generated/federation_clientset"
+	apiv1 "k8s.io/kubernetes/pkg/api/v1"
+	kubeclientset "k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
 
 	"github.com/golang/glog"
 )
@@ -55,6 +54,9 @@ type FederatedReadOnlyStore interface {
 	// Returns all items from a cluster.
 	ListFromCluster(clusterName string) ([]interface{}, error)
 
+	// GetKeyFor returns the key under which the item would be put in the store.
+	GetKeyFor(item interface{}) string
+
 	// GetByKey returns the item stored under the given key in the specified cluster (if exist).
 	GetByKey(clusterName string, key string) (interface{}, bool, error)
 
@@ -67,27 +69,30 @@ type FederatedReadOnlyStore interface {
 	// issues occur less often.	All users of the interface should assume
 	// that there may be significant delays in content updates of all kinds and write their
 	// code that it doesn't break if something is slightly out-of-sync.
-	ClustersSynced(clusters []*federation_api.Cluster) bool
+	ClustersSynced(clusters []*federationapi.Cluster) bool
 }
 
 // An interface to access federation members and clients.
 type FederationView interface {
 	// GetClientsetForCluster returns a clientset for the cluster, if present.
-	GetClientsetForCluster(clusterName string) (kube_release_1_4.Interface, error)
+	GetClientsetForCluster(clusterName string) (kubeclientset.Interface, error)
 
-	// GetReadyClusers returns all clusters for which the sub-informers are run.
-	GetReadyClusters() ([]*federation_api.Cluster, error)
+	// GetUnreadyClusters returns a list of all clusters that are not ready yet.
+	GetUnreadyClusters() ([]*federationapi.Cluster, error)
+
+	// GetReadyClusters returns all clusters for which the sub-informers are run.
+	GetReadyClusters() ([]*federationapi.Cluster, error)
 
 	// GetReadyCluster returns the cluster with the given name, if found.
-	GetReadyCluster(name string) (*federation_api.Cluster, bool, error)
+	GetReadyCluster(name string) (*federationapi.Cluster, bool, error)
 
 	// ClustersSynced returns true if the view is synced (for the first time).
 	ClustersSynced() bool
 }
 
-// A structure that combines an informer running agains federated api server and listening for cluster updates
+// A structure that combines an informer running against federated api server and listening for cluster updates
 // with multiple Kubernetes API informers (called target informers) running against federation members. Whenever a new
-// cluster is added to the federation an informer is created for it using TargetInformerFactory. Infomrers are stoped
+// cluster is added to the federation an informer is created for it using TargetInformerFactory. Informers are stopped
 // when a cluster is either put offline of deleted. It is assumed that some controller keeps an eye on the cluster list
 // and thus the clusters in ETCD are up to date.
 type FederatedInformer interface {
@@ -107,12 +112,12 @@ type FederatedInformer interface {
 type FederatedInformerForTestOnly interface {
 	FederatedInformer
 
-	SetClientFactory(func(*federation_api.Cluster) (kube_release_1_4.Interface, error))
+	SetClientFactory(func(*federationapi.Cluster) (kubeclientset.Interface, error))
 }
 
 // A function that should be used to create an informer on the target object. Store should use
-// framework.DeletionHandlingMetaNamespaceKeyFunc as a keying function.
-type TargetInformerFactory func(*federation_api.Cluster, kube_release_1_4.Interface) (cache.Store, framework.ControllerInterface)
+// cache.DeletionHandlingMetaNamespaceKeyFunc as a keying function.
+type TargetInformerFactory func(*federationapi.Cluster, kubeclientset.Interface) (cache.Store, cache.Controller)
 
 // A structure with cluster lifecycle handler functions. Cluster is available (and ClusterAvailable is fired)
 // when it is created in federated etcd and ready. Cluster becomes unavailable (and ClusterUnavailable is fired)
@@ -120,24 +125,24 @@ type TargetInformerFactory func(*federation_api.Cluster, kube_release_1_4.Interf
 // and ClusterUnavailable are fired.
 type ClusterLifecycleHandlerFuncs struct {
 	// Fired when the cluster becomes available.
-	ClusterAvailable func(*federation_api.Cluster)
+	ClusterAvailable func(*federationapi.Cluster)
 	// Fired when the cluster becomes unavailable. The second arg contains data that was present
 	// in the cluster before deletion.
-	ClusterUnavailable func(*federation_api.Cluster, []interface{})
+	ClusterUnavailable func(*federationapi.Cluster, []interface{})
 }
 
 // Builds a FederatedInformer for the given federation client and factory.
 func NewFederatedInformer(
-	federationClient federation_release_1_4.Interface,
+	federationClient federationclientset.Interface,
 	targetInformerFactory TargetInformerFactory,
 	clusterLifecycle *ClusterLifecycleHandlerFuncs) FederatedInformer {
 
 	federatedInformer := &federatedInformerImpl{
 		targetInformerFactory: targetInformerFactory,
-		clientFactory: func(cluster *federation_api.Cluster) (kube_release_1_4.Interface, error) {
+		clientFactory: func(cluster *federationapi.Cluster) (kubeclientset.Interface, error) {
 			clusterConfig, err := BuildClusterConfig(cluster)
 			if err == nil && clusterConfig != nil {
-				clientset := kube_release_1_4.NewForConfigOrDie(restclient.AddUserAgent(clusterConfig, userAgentName))
+				clientset := kubeclientset.NewForConfigOrDie(restclient.AddUserAgent(clusterConfig, userAgentName))
 				return clientset, nil
 			}
 			return nil, err
@@ -154,20 +159,20 @@ func NewFederatedInformer(
 		return data
 	}
 
-	federatedInformer.clusterInformer.store, federatedInformer.clusterInformer.controller = framework.NewInformer(
+	federatedInformer.clusterInformer.store, federatedInformer.clusterInformer.controller = cache.NewInformer(
 		&cache.ListWatch{
-			ListFunc: func(options api.ListOptions) (pkg_runtime.Object, error) {
+			ListFunc: func(options metav1.ListOptions) (pkgruntime.Object, error) {
 				return federationClient.Federation().Clusters().List(options)
 			},
-			WatchFunc: func(options api.ListOptions) (watch.Interface, error) {
+			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				return federationClient.Federation().Clusters().Watch(options)
 			},
 		},
-		&federation_api.Cluster{},
+		&federationapi.Cluster{},
 		clusterSyncPeriod,
-		framework.ResourceEventHandlerFuncs{
+		cache.ResourceEventHandlerFuncs{
 			DeleteFunc: func(old interface{}) {
-				oldCluster, ok := old.(*federation_api.Cluster)
+				oldCluster, ok := old.(*federationapi.Cluster)
 				if ok {
 					var data []interface{}
 					if clusterLifecycle.ClusterUnavailable != nil {
@@ -180,24 +185,28 @@ func NewFederatedInformer(
 				}
 			},
 			AddFunc: func(cur interface{}) {
-				curCluster, ok := cur.(*federation_api.Cluster)
+				curCluster, ok := cur.(*federationapi.Cluster)
 				if ok && isClusterReady(curCluster) {
 					federatedInformer.addCluster(curCluster)
 					if clusterLifecycle.ClusterAvailable != nil {
 						clusterLifecycle.ClusterAvailable(curCluster)
 					}
+				} else {
+					glog.Errorf("Cluster %v not added.  Not of correct type, or cluster not ready.", cur)
 				}
 			},
 			UpdateFunc: func(old, cur interface{}) {
-				oldCluster, ok := old.(*federation_api.Cluster)
+				oldCluster, ok := old.(*federationapi.Cluster)
 				if !ok {
+					glog.Errorf("Internal error: Cluster %v not updated.  Old cluster not of correct type.", old)
 					return
 				}
-				curCluster, ok := cur.(*federation_api.Cluster)
+				curCluster, ok := cur.(*federationapi.Cluster)
 				if !ok {
+					glog.Errorf("Internal error: Cluster %v not updated.  New cluster not of correct type.", cur)
 					return
 				}
-				if isClusterReady(oldCluster) != isClusterReady(curCluster) || !reflect.DeepEqual(oldCluster.Spec, curCluster.Spec) {
+				if isClusterReady(oldCluster) != isClusterReady(curCluster) || !reflect.DeepEqual(oldCluster.Spec, curCluster.Spec) || !reflect.DeepEqual(oldCluster.ObjectMeta.Annotations, curCluster.ObjectMeta.Annotations) {
 					var data []interface{}
 					if clusterLifecycle.ClusterUnavailable != nil {
 						data = getClusterData(oldCluster.Name)
@@ -213,6 +222,8 @@ func NewFederatedInformer(
 							clusterLifecycle.ClusterAvailable(curCluster)
 						}
 					}
+				} else {
+					glog.V(4).Infof("Cluster %v not updated to %v as ready status and specs are identical", oldCluster, curCluster)
 				}
 			},
 		},
@@ -220,10 +231,10 @@ func NewFederatedInformer(
 	return federatedInformer
 }
 
-func isClusterReady(cluster *federation_api.Cluster) bool {
+func isClusterReady(cluster *federationapi.Cluster) bool {
 	for _, condition := range cluster.Status.Conditions {
-		if condition.Type == federation_api.ClusterReady {
-			if condition.Status == api_v1.ConditionTrue {
+		if condition.Type == federationapi.ClusterReady {
+			if condition.Status == apiv1.ConditionTrue {
 				return true
 			}
 		}
@@ -232,7 +243,7 @@ func isClusterReady(cluster *federation_api.Cluster) bool {
 }
 
 type informer struct {
-	controller framework.ControllerInterface
+	controller cache.Controller
 	store      cache.Store
 	stopChan   chan struct{}
 }
@@ -250,19 +261,25 @@ type federatedInformerImpl struct {
 	targetInformers map[string]informer
 
 	// A function to build clients.
-	clientFactory func(*federation_api.Cluster) (kube_release_1_4.Interface, error)
+	clientFactory func(*federationapi.Cluster) (kubeclientset.Interface, error)
 }
+
+// *federatedInformerImpl implements FederatedInformer interface.
+var _ FederatedInformer = &federatedInformerImpl{}
 
 type federatedStoreImpl struct {
 	federatedInformer *federatedInformerImpl
 }
 
 func (f *federatedInformerImpl) Stop() {
+	glog.V(4).Infof("Stopping federated informer.")
 	f.Lock()
 	defer f.Unlock()
 
+	glog.V(4).Infof("... Closing cluster informer channel.")
 	close(f.clusterInformer.stopChan)
-	for _, informer := range f.targetInformers {
+	for key, informer := range f.targetInformers {
+		glog.V(4).Infof("... Closing informer channel for %q.", key)
 		close(informer.stopChan)
 	}
 }
@@ -275,7 +292,7 @@ func (f *federatedInformerImpl) Start() {
 	go f.clusterInformer.controller.Run(f.clusterInformer.stopChan)
 }
 
-func (f *federatedInformerImpl) SetClientFactory(clientFactory func(*federation_api.Cluster) (kube_release_1_4.Interface, error)) {
+func (f *federatedInformerImpl) SetClientFactory(clientFactory func(*federationapi.Cluster) (kubeclientset.Interface, error)) {
 	f.Lock()
 	defer f.Unlock()
 
@@ -283,33 +300,53 @@ func (f *federatedInformerImpl) SetClientFactory(clientFactory func(*federation_
 }
 
 // GetClientsetForCluster returns a clientset for the cluster, if present.
-func (f *federatedInformerImpl) GetClientsetForCluster(clusterName string) (kube_release_1_4.Interface, error) {
+func (f *federatedInformerImpl) GetClientsetForCluster(clusterName string) (kubeclientset.Interface, error) {
 	f.Lock()
 	defer f.Unlock()
 	return f.getClientsetForClusterUnlocked(clusterName)
 }
 
-func (f *federatedInformerImpl) getClientsetForClusterUnlocked(clusterName string) (kube_release_1_4.Interface, error) {
+func (f *federatedInformerImpl) getClientsetForClusterUnlocked(clusterName string) (kubeclientset.Interface, error) {
 	// No locking needed. Will happen in f.GetCluster.
+	glog.V(4).Infof("Getting clientset for cluster %q", clusterName)
 	if cluster, found, err := f.getReadyClusterUnlocked(clusterName); found && err == nil {
+		glog.V(4).Infof("Got clientset for cluster %q", clusterName)
 		return f.clientFactory(cluster)
 	} else {
 		if err != nil {
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("cluster %s not found", clusterName)
+	return nil, fmt.Errorf("cluster %q not found", clusterName)
 }
 
-// GetReadyClusers returns all clusters for which the sub-informers are run.
-func (f *federatedInformerImpl) GetReadyClusters() ([]*federation_api.Cluster, error) {
+func (f *federatedInformerImpl) GetUnreadyClusters() ([]*federationapi.Cluster, error) {
 	f.Lock()
 	defer f.Unlock()
 
 	items := f.clusterInformer.store.List()
-	result := make([]*federation_api.Cluster, 0, len(items))
+	result := make([]*federationapi.Cluster, 0, len(items))
 	for _, item := range items {
-		if cluster, ok := item.(*federation_api.Cluster); ok {
+		if cluster, ok := item.(*federationapi.Cluster); ok {
+			if !isClusterReady(cluster) {
+				result = append(result, cluster)
+			}
+		} else {
+			return nil, fmt.Errorf("wrong data in FederatedInformerImpl cluster store: %v", item)
+		}
+	}
+	return result, nil
+}
+
+// GetReadyClusters returns all clusters for which the sub-informers are run.
+func (f *federatedInformerImpl) GetReadyClusters() ([]*federationapi.Cluster, error) {
+	f.Lock()
+	defer f.Unlock()
+
+	items := f.clusterInformer.store.List()
+	result := make([]*federationapi.Cluster, 0, len(items))
+	for _, item := range items {
+		if cluster, ok := item.(*federationapi.Cluster); ok {
 			if isClusterReady(cluster) {
 				result = append(result, cluster)
 			}
@@ -321,15 +358,15 @@ func (f *federatedInformerImpl) GetReadyClusters() ([]*federation_api.Cluster, e
 }
 
 // GetCluster returns the cluster with the given name, if found.
-func (f *federatedInformerImpl) GetReadyCluster(name string) (*federation_api.Cluster, bool, error) {
+func (f *federatedInformerImpl) GetReadyCluster(name string) (*federationapi.Cluster, bool, error) {
 	f.Lock()
 	defer f.Unlock()
 	return f.getReadyClusterUnlocked(name)
 }
 
-func (f *federatedInformerImpl) getReadyClusterUnlocked(name string) (*federation_api.Cluster, bool, error) {
+func (f *federatedInformerImpl) getReadyClusterUnlocked(name string) (*federationapi.Cluster, bool, error) {
 	if obj, exist, err := f.clusterInformer.store.GetByKey(name); exist && err == nil {
-		if cluster, ok := obj.(*federation_api.Cluster); ok {
+		if cluster, ok := obj.(*federationapi.Cluster); ok {
 			if isClusterReady(cluster) {
 				return cluster, true, nil
 			}
@@ -349,7 +386,7 @@ func (f *federatedInformerImpl) ClustersSynced() bool {
 }
 
 // Adds the given cluster to federated informer.
-func (f *federatedInformerImpl) addCluster(cluster *federation_api.Cluster) {
+func (f *federatedInformerImpl) addCluster(cluster *federationapi.Cluster) {
 	f.Lock()
 	defer f.Unlock()
 	name := cluster.Name
@@ -369,7 +406,7 @@ func (f *federatedInformerImpl) addCluster(cluster *federation_api.Cluster) {
 }
 
 // Removes the cluster from federated informer.
-func (f *federatedInformerImpl) deleteCluster(cluster *federation_api.Cluster) {
+func (f *federatedInformerImpl) deleteCluster(cluster *federationapi.Cluster) {
 	f.Lock()
 	defer f.Unlock()
 	name := cluster.Name
@@ -441,16 +478,16 @@ func (fs *federatedStoreImpl) GetFromAllClusters(key string) ([]FederatedObject,
 	return result, nil
 }
 
-// GetKey for returns the key under which the item would be put in the store.
+// GetKeyFor returns the key under which the item would be put in the store.
 func (fs *federatedStoreImpl) GetKeyFor(item interface{}) string {
 	// TODO: support other keying functions.
-	key, _ := framework.DeletionHandlingMetaNamespaceKeyFunc(item)
+	key, _ := cache.DeletionHandlingMetaNamespaceKeyFunc(item)
 	return key
 }
 
 // Checks whether stores for all clusters form the lists (and only these) are there and
 // are synced.
-func (fs *federatedStoreImpl) ClustersSynced(clusters []*federation_api.Cluster) bool {
+func (fs *federatedStoreImpl) ClustersSynced(clusters []*federationapi.Cluster) bool {
 
 	// Get the list of informers to check under a lock and check it outside.
 	okSoFar, informersToCheck := func() (bool, []informer) {

@@ -17,10 +17,10 @@ limitations under the License.
 package validation
 
 import (
+	"k8s.io/apimachinery/pkg/api/validation/path"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kubernetes/pkg/api/validation"
-	"k8s.io/kubernetes/pkg/api/validation/path"
 	"k8s.io/kubernetes/pkg/apis/rbac"
-	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 // Minimal validation of names for roles and bindings. Identical to the validation for Openshift. See:
@@ -103,11 +103,17 @@ func ValidateRoleBinding(roleBinding *rbac.RoleBinding) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, validation.ValidateObjectMeta(&roleBinding.ObjectMeta, true, minimalNameRequirements, field.NewPath("metadata"))...)
 
-	// roleRef namespace is empty when referring to global policy.
-	if len(roleBinding.RoleRef.Namespace) > 0 {
-		for _, msg := range validation.ValidateNamespaceName(roleBinding.RoleRef.Namespace, false) {
-			allErrs = append(allErrs, field.Invalid(field.NewPath("roleRef", "namespace"), roleBinding.RoleRef.Namespace, msg))
-		}
+	// TODO allow multiple API groups.  For now, restrict to one, but I can envision other experimental roles in other groups taking
+	// advantage of the binding infrastructure
+	if roleBinding.RoleRef.APIGroup != rbac.GroupName {
+		allErrs = append(allErrs, field.NotSupported(field.NewPath("roleRef", "apiGroup"), roleBinding.RoleRef.APIGroup, []string{rbac.GroupName}))
+	}
+
+	switch roleBinding.RoleRef.Kind {
+	case "Role", "ClusterRole":
+	default:
+		allErrs = append(allErrs, field.NotSupported(field.NewPath("roleRef", "kind"), roleBinding.RoleRef.Kind, []string{"Role", "ClusterRole"}))
+
 	}
 
 	if len(roleBinding.RoleRef.Name) == 0 {
@@ -141,11 +147,17 @@ func ValidateClusterRoleBinding(roleBinding *rbac.ClusterRoleBinding) field.Erro
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, validation.ValidateObjectMeta(&roleBinding.ObjectMeta, false, minimalNameRequirements, field.NewPath("metadata"))...)
 
-	// roleRef namespace is empty when referring to global policy.
-	if len(roleBinding.RoleRef.Namespace) > 0 {
-		for _, msg := range validation.ValidateNamespaceName(roleBinding.RoleRef.Namespace, false) {
-			allErrs = append(allErrs, field.Invalid(field.NewPath("roleRef", "namespace"), roleBinding.RoleRef.Namespace, msg))
-		}
+	// TODO allow multiple API groups.  For now, restrict to one, but I can envision other experimental roles in other groups taking
+	// advantage of the binding infrastructure
+	if roleBinding.RoleRef.APIGroup != rbac.GroupName {
+		allErrs = append(allErrs, field.NotSupported(field.NewPath("roleRef", "apiGroup"), roleBinding.RoleRef.APIGroup, []string{rbac.GroupName}))
+	}
+
+	switch roleBinding.RoleRef.Kind {
+	case "ClusterRole":
+	default:
+		allErrs = append(allErrs, field.NotSupported(field.NewPath("roleRef", "kind"), roleBinding.RoleRef.Kind, []string{"ClusterRole"}))
+
 	}
 
 	if len(roleBinding.RoleRef.Name) == 0 {
@@ -189,6 +201,9 @@ func validateRoleBindingSubject(subject rbac.Subject, isNamespaced bool, fldPath
 				allErrs = append(allErrs, field.Invalid(fldPath.Child("name"), subject.Name, msg))
 			}
 		}
+		if len(subject.APIGroup) > 0 {
+			allErrs = append(allErrs, field.NotSupported(fldPath.Child("apiGroup"), subject.APIGroup, []string{""}))
+		}
 		if !isNamespaced && len(subject.Namespace) == 0 {
 			allErrs = append(allErrs, field.Required(fldPath.Child("namespace"), ""))
 		}
@@ -198,11 +213,17 @@ func validateRoleBindingSubject(subject rbac.Subject, isNamespaced bool, fldPath
 		if len(subject.Name) == 0 {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("name"), subject.Name, "user name cannot be empty"))
 		}
+		if subject.APIGroup != rbac.GroupName {
+			allErrs = append(allErrs, field.NotSupported(fldPath.Child("apiGroup"), subject.APIGroup, []string{rbac.GroupName}))
+		}
 
 	case rbac.GroupKind:
 		// TODO(ericchiang): What other restrictions on group name are there?
 		if len(subject.Name) == 0 {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("name"), subject.Name, "group name cannot be empty"))
+		}
+		if subject.APIGroup != rbac.GroupName {
+			allErrs = append(allErrs, field.NotSupported(fldPath.Child("apiGroup"), subject.APIGroup, []string{rbac.GroupName}))
 		}
 
 	default:

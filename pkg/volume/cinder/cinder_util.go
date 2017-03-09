@@ -19,11 +19,13 @@ package cinder
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/golang/glog"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/volume"
 )
@@ -31,7 +33,7 @@ import (
 type CinderDiskUtil struct{}
 
 // Attaches a disk specified by a volume.CinderPersistenDisk to the current kubelet.
-// Mounts the disk to it's global path.
+// Mounts the disk to its global path.
 func (util *CinderDiskUtil) AttachDisk(b *cinderVolumeMounter, globalPDPath string) error {
 	options := []string{}
 	if b.readOnly {
@@ -124,6 +126,8 @@ func (util *CinderDiskUtil) DeleteVolume(cd *cinderVolumeDeleter) error {
 	}
 
 	if err = cloud.DeleteVolume(cd.pdName); err != nil {
+		// OpenStack cloud provider returns volume.tryAgainError when necessary,
+		// no handling needed here.
 		glog.V(2).Infof("Error deleting cinder volume %s: %v", cd.pdName, err)
 		return err
 	}
@@ -137,7 +141,8 @@ func (util *CinderDiskUtil) CreateVolume(c *cinderVolumeProvisioner) (volumeID s
 		return "", 0, err
 	}
 
-	volSizeBytes := c.options.Capacity.Value()
+	capacity := c.options.PVC.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
+	volSizeBytes := capacity.Value()
 	// Cinder works with gigabytes, convert to GiB with rounding up
 	volSizeGB := int(volume.RoundUpSize(volSizeBytes, 1024*1024*1024))
 	name := volume.GenerateVolumeName(c.options.ClusterName, c.options.PVName, 255) // Cinder volume name can have up to 255 characters
@@ -155,8 +160,8 @@ func (util *CinderDiskUtil) CreateVolume(c *cinderVolumeProvisioner) (volumeID s
 			return "", 0, fmt.Errorf("invalid option %q for volume plugin %s", k, c.plugin.GetPluginName())
 		}
 	}
-	// TODO: implement c.options.ProvisionerSelector parsing
-	if c.options.Selector != nil {
+	// TODO: implement PVC.Selector parsing
+	if c.options.PVC.Spec.Selector != nil {
 		return "", 0, fmt.Errorf("claim.Spec.Selector is not supported for dynamic provisioning on Cinder")
 	}
 
@@ -170,9 +175,12 @@ func (util *CinderDiskUtil) CreateVolume(c *cinderVolumeProvisioner) (volumeID s
 }
 
 func probeAttachedVolume() error {
+	// rescan scsi bus
+	scsiHostRescan()
+
 	executor := exec.New()
 	args := []string{"trigger"}
-	cmd := executor.Command("/usr/bin/udevadm", args...)
+	cmd := executor.Command("udevadm", args...)
 	_, err := cmd.CombinedOutput()
 	if err != nil {
 		glog.Errorf("error running udevadm trigger %v\n", err)
@@ -180,4 +188,15 @@ func probeAttachedVolume() error {
 	}
 	glog.V(4).Infof("Successfully probed all attachments")
 	return nil
+}
+
+func scsiHostRescan() {
+	scsi_path := "/sys/class/scsi_host/"
+	if dirs, err := ioutil.ReadDir(scsi_path); err == nil {
+		for _, f := range dirs {
+			name := scsi_path + f.Name() + "/scan"
+			data := []byte("- - -")
+			ioutil.WriteFile(name, data, 0666)
+		}
+	}
 }

@@ -23,14 +23,14 @@ import (
 	"k8s.io/kubernetes/federation/pkg/dnsprovider/providers/google/clouddns/internal/interfaces"
 )
 
-// Compile time check for interface adeherence
+// Compile time check for interface adherence
 var _ interfaces.ManagedZonesDeleteCall = ManagedZonesDeleteCall{}
 
 type ManagedZonesDeleteCall struct {
 	Service  *ManagedZonesService
 	Project  string
 	ZoneName string
-	Error    *error // Use this to overide response for testing if required
+	Error    *error // Use this to override response for testing if required
 }
 
 func (call ManagedZonesDeleteCall) Do(opts ...googleapi.CallOption) error {

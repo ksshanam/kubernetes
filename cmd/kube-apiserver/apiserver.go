@@ -24,12 +24,12 @@ import (
 	"os"
 	"time"
 
+	"k8s.io/apiserver/pkg/util/flag"
+	"k8s.io/apiserver/pkg/util/logs"
 	"k8s.io/kubernetes/cmd/kube-apiserver/app"
 	"k8s.io/kubernetes/cmd/kube-apiserver/app/options"
 	_ "k8s.io/kubernetes/pkg/client/metrics/prometheus" // for client metric registration
-	"k8s.io/kubernetes/pkg/util/flag"
-	"k8s.io/kubernetes/pkg/util/logs"
-	_ "k8s.io/kubernetes/pkg/version/prometheus" // for version metric registration
+	_ "k8s.io/kubernetes/pkg/version/prometheus"        // for version metric registration
 	"k8s.io/kubernetes/pkg/version/verflag"
 
 	"github.com/spf13/pflag"
@@ -38,7 +38,7 @@ import (
 func main() {
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	s := options.NewAPIServer()
+	s := options.NewServerRunOptions()
 	s.AddFlags(pflag.CommandLine)
 
 	flag.InitFlags()

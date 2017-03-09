@@ -23,14 +23,14 @@ import (
 	"k8s.io/kubernetes/federation/pkg/dnsprovider/providers/google/clouddns/internal/interfaces"
 )
 
-// Compile time check for interface adeherence
+// Compile time check for interface adherence
 var _ interfaces.ManagedZonesListCall = &ManagedZonesListCall{}
 
 type ManagedZonesListCall struct {
 	Service  *ManagedZonesService
 	Project  string
-	Response *interfaces.ManagedZonesListResponse // Use this to overide response if required
-	Error    *error                               // Use this to overide response if required
+	Response *interfaces.ManagedZonesListResponse // Use this to override response if required
+	Error    *error                               // Use this to override response if required
 	DnsName_ string
 }
 

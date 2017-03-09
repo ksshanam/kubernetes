@@ -21,16 +21,20 @@ import (
 	"io"
 	"time"
 
-	lru "github.com/hashicorp/golang-lru"
+	"github.com/golang/glog"
 
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	"k8s.io/kubernetes/pkg/controller/framework"
-	"k8s.io/kubernetes/pkg/controller/framework/informers"
-
-	"k8s.io/kubernetes/pkg/admission"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apiserver/pkg/admission"
+	utilcache "k8s.io/apiserver/pkg/util/cache"
+	"k8s.io/client-go/util/clock"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/internalversion"
+	corelisters "k8s.io/kubernetes/pkg/client/listers/core/internalversion"
+	kubeapiserveradmission "k8s.io/kubernetes/pkg/kubeapiserver/admission"
 )
 
 const (
@@ -38,11 +42,17 @@ const (
 	PluginName = "NamespaceLifecycle"
 	// how long a namespace stays in the force live lookup cache before expiration.
 	forceLiveLookupTTL = 30 * time.Second
+	// how long to wait for a missing namespace before re-checking the cache (and then doing a live lookup)
+	// this accomplishes two things:
+	// 1. It allows a watch-fed cache time to observe a namespace creation event
+	// 2. It allows time for a namespace creation to distribute to members of a storage cluster,
+	//    so the live lookup has a better chance of succeeding even if it isn't performed against the leader.
+	missingNamespaceWait = 50 * time.Millisecond
 )
 
 func init() {
-	admission.RegisterPlugin(PluginName, func(client clientset.Interface, config io.Reader) (admission.Interface, error) {
-		return NewLifecycle(client, sets.NewString(api.NamespaceDefault, api.NamespaceSystem))
+	admission.RegisterPlugin(PluginName, func(config io.Reader) (admission.Interface, error) {
+		return NewLifecycle(sets.NewString(metav1.NamespaceDefault, metav1.NamespaceSystem, metav1.NamespacePublic))
 	})
 }
 
@@ -50,23 +60,24 @@ func init() {
 // It enforces life-cycle constraints around a Namespace depending on its Phase
 type lifecycle struct {
 	*admission.Handler
-	client             clientset.Interface
+	client             internalclientset.Interface
 	immortalNamespaces sets.String
-	namespaceInformer  framework.SharedIndexInformer
+	namespaceLister    corelisters.NamespaceLister
 	// forceLiveLookupCache holds a list of entries for namespaces that we have a strong reason to believe are stale in our local cache.
 	// if a namespace is in this cache, then we will ignore our local state and always fetch latest from api server.
-	forceLiveLookupCache *lru.Cache
+	forceLiveLookupCache *utilcache.LRUExpireCache
 }
 
 type forceLiveLookupEntry struct {
 	expiry time.Time
 }
 
-var _ = admission.WantsInformerFactory(&lifecycle{})
+var _ = kubeapiserveradmission.WantsInternalKubeInformerFactory(&lifecycle{})
+var _ = kubeapiserveradmission.WantsInternalKubeClientSet(&lifecycle{})
 
 func makeNamespaceKey(namespace string) *api.Namespace {
 	return &api.Namespace{
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      namespace,
 			Namespace: "",
 		},
@@ -88,11 +99,13 @@ func (l *lifecycle) Admit(a admission.Attributes) error {
 		// is slow to update, we add the namespace into a force live lookup list to ensure
 		// we are not looking at stale state.
 		if a.GetOperation() == admission.Delete {
-			newEntry := forceLiveLookupEntry{
-				expiry: time.Now().Add(forceLiveLookupTTL),
-			}
-			l.forceLiveLookupCache.Add(a.GetName(), newEntry)
+			l.forceLiveLookupCache.Add(a.GetName(), true, forceLiveLookupTTL)
 		}
+		return nil
+	}
+
+	// always allow access review checks.  Returning status about the namespace would be leaking information
+	if isAccessReview(a) {
 		return nil
 	}
 
@@ -102,40 +115,59 @@ func (l *lifecycle) Admit(a admission.Attributes) error {
 	}
 
 	var (
-		namespaceObj interface{}
-		exists       bool
-		err          error
+		exists bool
+		err    error
 	)
 
-	key := makeNamespaceKey(a.GetNamespace())
-	namespaceObj, exists, err = l.namespaceInformer.GetStore().Get(key)
+	namespace, err := l.namespaceLister.Get(a.GetNamespace())
 	if err != nil {
-		return errors.NewInternalError(err)
+		if !errors.IsNotFound(err) {
+			return errors.NewInternalError(err)
+		}
+	} else {
+		exists = true
+	}
+
+	if !exists && a.GetOperation() == admission.Create {
+		// give the cache time to observe the namespace before rejecting a create.
+		// this helps when creating a namespace and immediately creating objects within it.
+		time.Sleep(missingNamespaceWait)
+		namespace, err = l.namespaceLister.Get(a.GetNamespace())
+		switch {
+		case errors.IsNotFound(err):
+			// no-op
+		case err != nil:
+			return errors.NewInternalError(err)
+		default:
+			exists = true
+		}
+		if exists {
+			glog.V(4).Infof("found %s in cache after waiting", a.GetNamespace())
+		}
 	}
 
 	// forceLiveLookup if true will skip looking at local cache state and instead always make a live call to server.
 	forceLiveLookup := false
-	lruItemObj, ok := l.forceLiveLookupCache.Get(a.GetNamespace())
-	if ok && lruItemObj.(forceLiveLookupEntry).expiry.Before(time.Now()) {
+	if _, ok := l.forceLiveLookupCache.Get(a.GetNamespace()); ok {
 		// we think the namespace was marked for deletion, but our current local cache says otherwise, we will force a live lookup.
-		forceLiveLookup = exists && namespaceObj.(*api.Namespace).Status.Phase == api.NamespaceActive
+		forceLiveLookup = exists && namespace.Status.Phase == api.NamespaceActive
 	}
 
 	// refuse to operate on non-existent namespaces
 	if !exists || forceLiveLookup {
-		// in case of latency in our caches, make a call direct to storage to verify that it truly exists or not
-		namespaceObj, err = l.client.Core().Namespaces().Get(a.GetNamespace())
-		if err != nil {
-			if errors.IsNotFound(err) {
-				return err
-			}
+		// as a last resort, make a call directly to storage
+		namespace, err = l.client.Core().Namespaces().Get(a.GetNamespace(), metav1.GetOptions{})
+		switch {
+		case errors.IsNotFound(err):
+			return err
+		case err != nil:
 			return errors.NewInternalError(err)
 		}
+		glog.V(4).Infof("found %s via storage lookup", a.GetNamespace())
 	}
 
 	// ensure that we're not trying to create objects in terminating namespaces
 	if a.GetOperation() == admission.Create {
-		namespace := namespaceObj.(*api.Namespace)
 		if namespace.Status.Phase != api.NamespaceTerminating {
 			return nil
 		}
@@ -148,27 +180,45 @@ func (l *lifecycle) Admit(a admission.Attributes) error {
 }
 
 // NewLifecycle creates a new namespace lifecycle admission control handler
-func NewLifecycle(c clientset.Interface, immortalNamespaces sets.String) (admission.Interface, error) {
-	forceLiveLookupCache, err := lru.New(100)
-	if err != nil {
-		panic(err)
-	}
+func NewLifecycle(immortalNamespaces sets.String) (admission.Interface, error) {
+	return newLifecycleWithClock(immortalNamespaces, clock.RealClock{})
+}
+
+func newLifecycleWithClock(immortalNamespaces sets.String, clock utilcache.Clock) (admission.Interface, error) {
+	forceLiveLookupCache := utilcache.NewLRUExpireCacheWithClock(100, clock)
 	return &lifecycle{
 		Handler:              admission.NewHandler(admission.Create, admission.Update, admission.Delete),
-		client:               c,
 		immortalNamespaces:   immortalNamespaces,
 		forceLiveLookupCache: forceLiveLookupCache,
 	}, nil
 }
 
-func (l *lifecycle) SetInformerFactory(f informers.SharedInformerFactory) {
-	l.namespaceInformer = f.Namespaces().Informer()
-	l.SetReadyFunc(l.namespaceInformer.HasSynced)
+func (l *lifecycle) SetInternalKubeInformerFactory(f informers.SharedInformerFactory) {
+	namespaceInformer := f.Core().InternalVersion().Namespaces()
+	l.namespaceLister = namespaceInformer.Lister()
+	l.SetReadyFunc(namespaceInformer.Informer().HasSynced)
+}
+
+func (l *lifecycle) SetInternalKubeClientSet(client internalclientset.Interface) {
+	l.client = client
 }
 
 func (l *lifecycle) Validate() error {
-	if l.namespaceInformer == nil {
-		return fmt.Errorf("missing namespaceInformer")
+	if l.namespaceLister == nil {
+		return fmt.Errorf("missing namespaceLister")
+	}
+	if l.client == nil {
+		return fmt.Errorf("missing client")
 	}
 	return nil
+}
+
+// accessReviewResources are resources which give a view into permissions in a namespace.  Users must be allowed to create these
+// resources because returning "not found" errors allows someone to search for the "people I'm going to fire in 2017" namespace.
+var accessReviewResources = map[schema.GroupResource]bool{
+	schema.GroupResource{Group: "authorization.k8s.io", Resource: "localsubjectaccessreviews"}: true,
+}
+
+func isAccessReview(a admission.Attributes) bool {
+	return accessReviewResources[a.GetResource().GroupResource()]
 }

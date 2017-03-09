@@ -17,8 +17,6 @@ limitations under the License.
 // A binary that can morph into all of the other kubernetes binaries. You can
 // also soft-link to it busybox style.
 //
-// CAUTION: If you update code in this file, you may need to also update code
-//          in contrib/mesos/cmd/km/km.go
 package main
 
 import (
@@ -40,6 +38,7 @@ func main() {
 	hk.AddServer(NewScheduler())
 	hk.AddServer(NewKubelet())
 	hk.AddServer(NewKubeProxy())
+	hk.AddServer(NewKubeAggregator())
 
 	//Federation servers
 	hk.AddServer(NewFederationAPIServer())

@@ -19,14 +19,16 @@ package util
 import (
 	"reflect"
 
-	api_v1 "k8s.io/kubernetes/pkg/api/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/kubernetes/pkg/api"
 )
 
 // Copies cluster-independent, user provided data from the given ObjectMeta struct. If in
-// the future the ObjectMeta structure is expanded then any field that is not populared
+// the future the ObjectMeta structure is expanded then any field that is not populated
 // by the api server should be included here.
-func CopyObjectMeta(obj api_v1.ObjectMeta) api_v1.ObjectMeta {
-	return api_v1.ObjectMeta{
+func copyObjectMeta(obj metav1.ObjectMeta) metav1.ObjectMeta {
+	return metav1.ObjectMeta{
 		Name:        obj.Name,
 		Namespace:   obj.Namespace,
 		Labels:      obj.Labels,
@@ -34,21 +36,59 @@ func CopyObjectMeta(obj api_v1.ObjectMeta) api_v1.ObjectMeta {
 	}
 }
 
-// Checks if cluster-independed, user provided data in two given ObjectMeta are eqaul. If in
-// the future the ObjectMeta structure is expanded then any field that is not populared
+// Deep copies cluster-independent, user provided data from the given ObjectMeta struct. If in
+// the future the ObjectMeta structure is expanded then any field that is not populated
 // by the api server should be included here.
-func ObjectMetaEquivalent(a, b api_v1.ObjectMeta) bool {
+func DeepCopyRelevantObjectMeta(obj metav1.ObjectMeta) metav1.ObjectMeta {
+	copyMeta := copyObjectMeta(obj)
+	if obj.Labels != nil {
+		copyMeta.Labels = make(map[string]string)
+		for key, val := range obj.Labels {
+			copyMeta.Labels[key] = val
+		}
+	}
+	if obj.Annotations != nil {
+		copyMeta.Annotations = make(map[string]string)
+		for key, val := range obj.Annotations {
+			copyMeta.Annotations[key] = val
+		}
+	}
+	return copyMeta
+}
+
+// Checks if cluster-independent, user provided data in two given ObjectMeta are equal. If in
+// the future the ObjectMeta structure is expanded then any field that is not populated
+// by the api server should be included here.
+func ObjectMetaEquivalent(a, b metav1.ObjectMeta) bool {
 	if a.Name != b.Name {
 		return false
 	}
 	if a.Namespace != b.Namespace {
 		return false
 	}
-	if !reflect.DeepEqual(a.Labels, b.Labels) {
+	if !reflect.DeepEqual(a.Labels, b.Labels) && (len(a.Labels) != 0 || len(b.Labels) != 0) {
 		return false
 	}
-	if !reflect.DeepEqual(a.Annotations, b.Annotations) {
+	if !reflect.DeepEqual(a.Annotations, b.Annotations) && (len(a.Annotations) != 0 || len(b.Annotations) != 0) {
 		return false
 	}
 	return true
+}
+
+// Checks if cluster-independent, user provided data in ObjectMeta and Spec in two given top
+// level api objects are equivalent.
+func ObjectMetaAndSpecEquivalent(a, b runtime.Object) bool {
+	objectMetaA := reflect.ValueOf(a).Elem().FieldByName("ObjectMeta").Interface().(metav1.ObjectMeta)
+	objectMetaB := reflect.ValueOf(b).Elem().FieldByName("ObjectMeta").Interface().(metav1.ObjectMeta)
+	specA := reflect.ValueOf(a).Elem().FieldByName("Spec").Interface()
+	specB := reflect.ValueOf(b).Elem().FieldByName("Spec").Interface()
+	return ObjectMetaEquivalent(objectMetaA, objectMetaB) && reflect.DeepEqual(specA, specB)
+}
+
+func DeepCopyApiTypeOrPanic(item interface{}) interface{} {
+	result, err := api.Scheme.DeepCopy(item)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }

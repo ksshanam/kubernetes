@@ -12,9 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM busybox
-MAINTAINER Tim Hockin <thockin@google.com>
+FROM BASEIMAGE
 ADD serve_hostname /serve_hostname
-ADD serve_hostname.go /serve_hostname.go
 EXPOSE 9376
 ENTRYPOINT ["/serve_hostname"]

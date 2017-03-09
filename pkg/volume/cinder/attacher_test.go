@@ -18,14 +18,19 @@ package cinder
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	"k8s.io/kubernetes/pkg/volume"
 	volumetest "k8s.io/kubernetes/pkg/volume/testing"
 
+	"fmt"
+	"sort"
+
 	"github.com/golang/glog"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestGetDeviceName_Volume(t *testing.T) {
@@ -56,33 +61,57 @@ func TestGetDeviceName_PersistentVolume(t *testing.T) {
 	}
 }
 
+func TestGetDeviceMountPath(t *testing.T) {
+	name := "cinder-volume-id"
+	spec := createVolSpec(name, false)
+	rootDir := "/var/lib/kubelet/"
+	host := volumetest.NewFakeVolumeHost(rootDir, nil, nil)
+
+	attacher := &cinderDiskAttacher{
+		host: host,
+	}
+
+	//test the path
+	path, err := attacher.GetDeviceMountPath(spec)
+	if err != nil {
+		t.Errorf("Get device mount path error")
+	}
+	expectedPath := rootDir + "plugins/kubernetes.io/cinder/mounts/" + name
+	if path != expectedPath {
+		t.Errorf("Device mount path error: expected %s, got %s ", expectedPath, path)
+	}
+}
+
 // One testcase for TestAttachDetach table test below
 type testcase struct {
 	name string
 	// For fake GCE:
-	attach         attachCall
-	detach         detachCall
-	diskIsAttached diskIsAttachedCall
-	diskPath       diskPathCall
-	t              *testing.T
+	attach           attachCall
+	detach           detachCall
+	diskIsAttached   diskIsAttachedCall
+	disksAreAttached disksAreAttachedCall
+	diskPath         diskPathCall
+	t                *testing.T
 
 	instanceID string
 	// Actual test to run
 	test func(test *testcase) (string, error)
 	// Expected return of the test
-	expectedDevice string
+	expectedResult string
 	expectedError  error
 }
 
 func TestAttachDetach(t *testing.T) {
 	diskName := "disk"
 	instanceID := "instance"
+	nodeName := types.NodeName("nodeName")
 	readOnly := false
 	spec := createVolSpec(diskName, readOnly)
 	attachError := errors.New("Fake attach error")
 	detachError := errors.New("Fake detach error")
 	diskCheckError := errors.New("Fake DiskIsAttached error")
 	diskPathError := errors.New("Fake GetAttachmentDiskPath error")
+	disksCheckError := errors.New("Fake DisksAreAttached error")
 	tests := []testcase{
 		// Successful Attach call
 		{
@@ -93,9 +122,9 @@ func TestAttachDetach(t *testing.T) {
 			diskPath:       diskPathCall{diskName, instanceID, "/dev/sda", nil},
 			test: func(testcase *testcase) (string, error) {
 				attacher := newAttacher(testcase)
-				return attacher.Attach(spec, instanceID)
+				return attacher.Attach(spec, nodeName)
 			},
-			expectedDevice: "/dev/sda",
+			expectedResult: "/dev/sda",
 		},
 
 		// Disk is already attached
@@ -106,9 +135,9 @@ func TestAttachDetach(t *testing.T) {
 			diskPath:       diskPathCall{diskName, instanceID, "/dev/sda", nil},
 			test: func(testcase *testcase) (string, error) {
 				attacher := newAttacher(testcase)
-				return attacher.Attach(spec, instanceID)
+				return attacher.Attach(spec, nodeName)
 			},
-			expectedDevice: "/dev/sda",
+			expectedResult: "/dev/sda",
 		},
 
 		// DiskIsAttached fails and Attach succeeds
@@ -120,9 +149,9 @@ func TestAttachDetach(t *testing.T) {
 			diskPath:       diskPathCall{diskName, instanceID, "/dev/sda", nil},
 			test: func(testcase *testcase) (string, error) {
 				attacher := newAttacher(testcase)
-				return attacher.Attach(spec, instanceID)
+				return attacher.Attach(spec, nodeName)
 			},
-			expectedDevice: "/dev/sda",
+			expectedResult: "/dev/sda",
 		},
 
 		// Attach call fails
@@ -133,7 +162,7 @@ func TestAttachDetach(t *testing.T) {
 			attach:         attachCall{diskName, instanceID, "/dev/sda", attachError},
 			test: func(testcase *testcase) (string, error) {
 				attacher := newAttacher(testcase)
-				return attacher.Attach(spec, instanceID)
+				return attacher.Attach(spec, nodeName)
 			},
 			expectedError: attachError,
 		},
@@ -147,9 +176,49 @@ func TestAttachDetach(t *testing.T) {
 			diskPath:       diskPathCall{diskName, instanceID, "", diskPathError},
 			test: func(testcase *testcase) (string, error) {
 				attacher := newAttacher(testcase)
-				return attacher.Attach(spec, instanceID)
+				return attacher.Attach(spec, nodeName)
 			},
 			expectedError: diskPathError,
+		},
+
+		// Successful VolumesAreAttached call, attached
+		{
+			name:             "VolumesAreAttached_Positive",
+			instanceID:       instanceID,
+			disksAreAttached: disksAreAttachedCall{[]string{diskName}, instanceID, map[string]bool{diskName: true}, nil},
+			test: func(testcase *testcase) (string, error) {
+				attacher := newAttacher(testcase)
+				attachments, err := attacher.VolumesAreAttached([]*volume.Spec{spec}, nodeName)
+				return serializeAttachments(attachments), err
+			},
+			expectedResult: serializeAttachments(map[*volume.Spec]bool{spec: true}),
+		},
+
+		// Successful VolumesAreAttached call, not attached
+		{
+			name:             "VolumesAreAttached_Negative",
+			instanceID:       instanceID,
+			disksAreAttached: disksAreAttachedCall{[]string{diskName}, instanceID, map[string]bool{diskName: false}, nil},
+			test: func(testcase *testcase) (string, error) {
+				attacher := newAttacher(testcase)
+				attachments, err := attacher.VolumesAreAttached([]*volume.Spec{spec}, nodeName)
+				return serializeAttachments(attachments), err
+			},
+			expectedResult: serializeAttachments(map[*volume.Spec]bool{spec: false}),
+		},
+
+		// Treat as attached when DisksAreAttached call fails
+		{
+			name:             "VolumesAreAttached_CinderFailed",
+			instanceID:       instanceID,
+			disksAreAttached: disksAreAttachedCall{[]string{diskName}, instanceID, nil, disksCheckError},
+			test: func(testcase *testcase) (string, error) {
+				attacher := newAttacher(testcase)
+				attachments, err := attacher.VolumesAreAttached([]*volume.Spec{spec}, nodeName)
+				return serializeAttachments(attachments), err
+			},
+			expectedResult: serializeAttachments(map[*volume.Spec]bool{spec: true}),
+			expectedError:  disksCheckError,
 		},
 
 		// Detach succeeds
@@ -160,7 +229,7 @@ func TestAttachDetach(t *testing.T) {
 			detach:         detachCall{diskName, instanceID, nil},
 			test: func(testcase *testcase) (string, error) {
 				detacher := newDetacher(testcase)
-				return "", detacher.Detach(diskName, instanceID)
+				return "", detacher.Detach(diskName, nodeName)
 			},
 		},
 
@@ -171,7 +240,7 @@ func TestAttachDetach(t *testing.T) {
 			diskIsAttached: diskIsAttachedCall{diskName, instanceID, false, nil},
 			test: func(testcase *testcase) (string, error) {
 				detacher := newDetacher(testcase)
-				return "", detacher.Detach(diskName, instanceID)
+				return "", detacher.Detach(diskName, nodeName)
 			},
 		},
 
@@ -183,7 +252,7 @@ func TestAttachDetach(t *testing.T) {
 			detach:         detachCall{diskName, instanceID, nil},
 			test: func(testcase *testcase) (string, error) {
 				detacher := newDetacher(testcase)
-				return "", detacher.Detach(diskName, instanceID)
+				return "", detacher.Detach(diskName, nodeName)
 			},
 		},
 
@@ -195,7 +264,7 @@ func TestAttachDetach(t *testing.T) {
 			detach:         detachCall{diskName, instanceID, detachError},
 			test: func(testcase *testcase) (string, error) {
 				detacher := newDetacher(testcase)
-				return "", detacher.Detach(diskName, instanceID)
+				return "", detacher.Detach(diskName, nodeName)
 			},
 			expectedError: detachError,
 		},
@@ -203,21 +272,55 @@ func TestAttachDetach(t *testing.T) {
 
 	for _, testcase := range tests {
 		testcase.t = t
-		device, err := testcase.test(&testcase)
+		result, err := testcase.test(&testcase)
 		if err != testcase.expectedError {
-			t.Errorf("%s failed: expected err=%q, got %q", testcase.name, testcase.expectedError.Error(), err.Error())
+			t.Errorf("%s failed: expected err=%q, got %q", testcase.name, testcase.expectedError, err)
 		}
-		if device != testcase.expectedDevice {
-			t.Errorf("%s failed: expected device=%q, got %q", testcase.name, testcase.expectedDevice, device)
+		if result != testcase.expectedResult {
+			t.Errorf("%s failed: expected result=%q, got %q", testcase.name, testcase.expectedResult, result)
 		}
 		t.Logf("Test %q succeeded", testcase.name)
 	}
 }
 
+type volumeAttachmentFlag struct {
+	diskName string
+	attached bool
+}
+
+type volumeAttachmentFlags []volumeAttachmentFlag
+
+func (va volumeAttachmentFlags) Len() int {
+	return len(va)
+}
+
+func (va volumeAttachmentFlags) Swap(i, j int) {
+	va[i], va[j] = va[j], va[i]
+}
+
+func (va volumeAttachmentFlags) Less(i, j int) bool {
+	if va[i].diskName < va[j].diskName {
+		return true
+	}
+	if va[i].diskName > va[j].diskName {
+		return false
+	}
+	return va[j].attached
+}
+
+func serializeAttachments(attachments map[*volume.Spec]bool) string {
+	var attachmentFlags volumeAttachmentFlags
+	for spec, attached := range attachments {
+		attachmentFlags = append(attachmentFlags, volumeAttachmentFlag{spec.Name(), attached})
+	}
+	sort.Sort(attachmentFlags)
+	return fmt.Sprint(attachmentFlags)
+}
+
 // newPlugin creates a new gcePersistentDiskPlugin with fake cloud, NewAttacher
 // and NewDetacher won't work.
 func newPlugin() *cinderPlugin {
-	host := volumetest.NewFakeVolumeHost("/tmp", nil, nil, "")
+	host := volumetest.NewFakeVolumeHost("/tmp", nil, nil)
 	plugins := ProbeVolumePlugins()
 	plugin := plugins[0]
 	plugin.Init(host)
@@ -239,9 +342,10 @@ func newDetacher(testcase *testcase) *cinderDiskDetacher {
 
 func createVolSpec(name string, readOnly bool) *volume.Spec {
 	return &volume.Spec{
-		Volume: &api.Volume{
-			VolumeSource: api.VolumeSource{
-				Cinder: &api.CinderVolumeSource{
+		Volume: &v1.Volume{
+			Name: name,
+			VolumeSource: v1.VolumeSource{
+				Cinder: &v1.CinderVolumeSource{
 					VolumeID: name,
 					ReadOnly: readOnly,
 				},
@@ -252,10 +356,10 @@ func createVolSpec(name string, readOnly bool) *volume.Spec {
 
 func createPVSpec(name string, readOnly bool) *volume.Spec {
 	return &volume.Spec{
-		PersistentVolume: &api.PersistentVolume{
-			Spec: api.PersistentVolumeSpec{
-				PersistentVolumeSource: api.PersistentVolumeSource{
-					Cinder: &api.CinderVolumeSource{
+		PersistentVolume: &v1.PersistentVolume{
+			Spec: v1.PersistentVolumeSpec{
+				PersistentVolumeSource: v1.PersistentVolumeSource{
+					Cinder: &v1.CinderVolumeSource{
 						VolumeID: name,
 						ReadOnly: readOnly,
 					},
@@ -290,6 +394,13 @@ type diskPathCall struct {
 	diskName, instanceID string
 	retPath              string
 	ret                  error
+}
+
+type disksAreAttachedCall struct {
+	diskNames   []string
+	instanceID  string
+	areAttached map[string]bool
+	ret         error
 }
 
 func (testcase *testcase) AttachDisk(instanceID string, diskName string) (string, error) {
@@ -391,6 +502,10 @@ func (testcase *testcase) GetAttachmentDiskPath(instanceID string, diskName stri
 	return expected.retPath, expected.ret
 }
 
+func (testcase *testcase) ShouldTrustDevicePath() bool {
+	return true
+}
+
 func (testcase *testcase) CreateVolume(name string, size int, vtype, availability string, tags *map[string]string) (volumeName string, err error) {
 	return "", errors.New("Not implemented")
 }
@@ -415,35 +530,61 @@ func (testcase *testcase) Instances() (cloudprovider.Instances, bool) {
 	return &instances{testcase.instanceID}, true
 }
 
+func (testcase *testcase) DisksAreAttached(diskNames []string, instanceID string) (map[string]bool, error) {
+	expected := &testcase.disksAreAttached
+
+	areAttached := make(map[string]bool)
+
+	if len(expected.diskNames) == 0 && expected.instanceID == "" {
+		// testcase.diskNames looks uninitialized, test did not expect to call DisksAreAttached
+		testcase.t.Errorf("Unexpected DisksAreAttached call!")
+		return areAttached, errors.New("Unexpected DisksAreAttached call")
+	}
+
+	if !reflect.DeepEqual(expected.diskNames, diskNames) {
+		testcase.t.Errorf("Unexpected DisksAreAttached call: expected diskNames %v, got %v", expected.diskNames, diskNames)
+		return areAttached, errors.New("Unexpected DisksAreAttached call: wrong diskName")
+	}
+
+	if expected.instanceID != instanceID {
+		testcase.t.Errorf("Unexpected DisksAreAttached call: expected instanceID %s, got %s", expected.instanceID, instanceID)
+		return areAttached, errors.New("Unexpected DisksAreAttached call: wrong instanceID")
+	}
+
+	glog.V(4).Infof("DisksAreAttached call: %v, %s, returning %v, %v", diskNames, instanceID, expected.areAttached, expected.ret)
+
+	return expected.areAttached, expected.ret
+}
+
 // Implementation of fake cloudprovider.Instances
 type instances struct {
 	instanceID string
 }
 
-func (instances *instances) NodeAddresses(name string) ([]api.NodeAddress, error) {
-	return []api.NodeAddress{}, errors.New("Not implemented")
+func (instances *instances) NodeAddresses(name types.NodeName) ([]v1.NodeAddress, error) {
+	return []v1.NodeAddress{}, errors.New("Not implemented")
 }
 
-func (instances *instances) ExternalID(name string) (string, error) {
+func (instances *instances) ExternalID(name types.NodeName) (string, error) {
 	return "", errors.New("Not implemented")
 }
 
-func (instances *instances) InstanceID(name string) (string, error) {
+func (instances *instances) InstanceID(name types.NodeName) (string, error) {
 	return instances.instanceID, nil
 }
 
-func (instances *instances) InstanceType(name string) (string, error) {
+func (instances *instances) InstanceType(name types.NodeName) (string, error) {
 	return "", errors.New("Not implemented")
 }
 
-func (instances *instances) List(filter string) ([]string, error) {
-	return []string{}, errors.New("Not implemented")
+func (instances *instances) List(filter string) ([]types.NodeName, error) {
+	return []types.NodeName{}, errors.New("Not implemented")
 }
 
 func (instances *instances) AddSSHKeyToAllInstances(user string, keyData []byte) error {
 	return errors.New("Not implemented")
 }
 
-func (instances *instances) CurrentNodeName(hostname string) (string, error) {
+func (instances *instances) CurrentNodeName(hostname string) (types.NodeName, error) {
 	return "", errors.New("Not implemented")
 }

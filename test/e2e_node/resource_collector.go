@@ -24,7 +24,6 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,12 +34,14 @@ import (
 	cadvisorclient "github.com/google/cadvisor/client/v2"
 	cadvisorapiv2 "github.com/google/cadvisor/info/v2"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
-	"k8s.io/kubernetes/pkg/api"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/kubelet/api/v1alpha1/stats"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/util/runtime"
-	"k8s.io/kubernetes/pkg/util/uuid"
-	"k8s.io/kubernetes/pkg/util/wait"
+	"k8s.io/kubernetes/pkg/util/procfs"
 	"k8s.io/kubernetes/test/e2e/framework"
 
 	. "github.com/onsi/gomega"
@@ -192,7 +193,7 @@ func (r *ResourceCollector) GetLatest() (framework.ResourceUsagePerContainer, er
 	for key, name := range systemContainers {
 		contStats, ok := r.buffers[name]
 		if !ok || len(contStats) == 0 {
-			return nil, fmt.Errorf("Resource usage of %s:%s is not ready yet", key, name)
+			return nil, fmt.Errorf("No resource usage data for %s container (%s)", key, name)
 		}
 		stats[key] = contStats[len(contStats)-1]
 	}
@@ -237,7 +238,7 @@ func (r *ResourceCollector) GetBasicCPUStats(containerName string) map[float64]f
 func formatResourceUsageStats(containerStats framework.ResourceUsagePerContainer) string {
 	// Example output:
 	//
-	// Resource usage for node "e2e-test-foo-minion-abcde":
+	// Resource usage for node "e2e-test-foo-node-abcde":
 	// container        cpu(cores)  memory(MB)
 	// "/"              0.363       2942.09
 	// "/docker-daemon" 0.088       521.80
@@ -255,7 +256,7 @@ func formatResourceUsageStats(containerStats framework.ResourceUsagePerContainer
 
 func formatCPUSummary(summary framework.ContainersCPUSummary) string {
 	// Example output for a node (the percentiles may differ):
-	// CPU usage of containers on node "e2e-test-foo-minion-0vj7":
+	// CPU usage of containers on node "e2e-test-foo-node-0vj7":
 	// container        5th%  50th% 90th% 95th%
 	// "/"              0.051 0.159 0.387 0.455
 	// "/runtime        0.000 0.000 0.146 0.166
@@ -292,30 +293,29 @@ func formatCPUSummary(summary framework.ContainersCPUSummary) string {
 }
 
 // createCadvisorPod creates a standalone cadvisor pod for fine-grain resource monitoring.
-func getCadvisorPod() *api.Pod {
-	return &api.Pod{
-		ObjectMeta: api.ObjectMeta{
+func getCadvisorPod() *v1.Pod {
+	return &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: cadvisorPodName,
 		},
-		Spec: api.PodSpec{
+		Spec: v1.PodSpec{
 			// It uses a host port for the tests to collect data.
 			// Currently we can not use port mapping in test-e2e-node.
-			SecurityContext: &api.PodSecurityContext{
-				HostNetwork: true,
-			},
-			Containers: []api.Container{
+			HostNetwork:     true,
+			SecurityContext: &v1.PodSecurityContext{},
+			Containers: []v1.Container{
 				{
 					Image: cadvisorImageName,
 					Name:  cadvisorPodName,
-					Ports: []api.ContainerPort{
+					Ports: []v1.ContainerPort{
 						{
 							Name:          "http",
 							HostPort:      cadvisorPort,
 							ContainerPort: cadvisorPort,
-							Protocol:      api.ProtocolTCP,
+							Protocol:      v1.ProtocolTCP,
 						},
 					},
-					VolumeMounts: []api.VolumeMount{
+					VolumeMounts: []v1.VolumeMount{
 						{
 							Name:      "sys",
 							ReadOnly:  true,
@@ -344,22 +344,22 @@ func getCadvisorPod() *api.Pod {
 					},
 				},
 			},
-			Volumes: []api.Volume{
+			Volumes: []v1.Volume{
 				{
 					Name:         "rootfs",
-					VolumeSource: api.VolumeSource{HostPath: &api.HostPathVolumeSource{Path: "/"}},
+					VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/"}},
 				},
 				{
 					Name:         "var-run",
-					VolumeSource: api.VolumeSource{HostPath: &api.HostPathVolumeSource{Path: "/var/run"}},
+					VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/var/run"}},
 				},
 				{
 					Name:         "sys",
-					VolumeSource: api.VolumeSource{HostPath: &api.HostPathVolumeSource{Path: "/sys"}},
+					VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/sys"}},
 				},
 				{
 					Name:         "docker",
-					VolumeSource: api.VolumeSource{HostPath: &api.HostPathVolumeSource{Path: "/var/lib/docker"}},
+					VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/var/lib/docker"}},
 				},
 			},
 		},
@@ -367,17 +367,17 @@ func getCadvisorPod() *api.Pod {
 }
 
 // deletePodsSync deletes a list of pods and block until pods disappear.
-func deletePodsSync(f *framework.Framework, pods []*api.Pod) {
+func deletePodsSync(f *framework.Framework, pods []*v1.Pod) {
 	var wg sync.WaitGroup
 	for _, pod := range pods {
 		wg.Add(1)
-		go func(pod *api.Pod) {
+		go func(pod *v1.Pod) {
 			defer wg.Done()
 
-			err := f.PodClient().Delete(pod.ObjectMeta.Name, api.NewDeleteOptions(30))
+			err := f.PodClient().Delete(pod.ObjectMeta.Name, metav1.NewDeleteOptions(30))
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(framework.WaitForPodToDisappear(f.Client, f.Namespace.Name, pod.ObjectMeta.Name, labels.Everything(),
+			Expect(framework.WaitForPodToDisappear(f.ClientSet, f.Namespace.Name, pod.ObjectMeta.Name, labels.Everything(),
 				30*time.Second, 10*time.Minute)).NotTo(HaveOccurred())
 		}(pod)
 	}
@@ -386,30 +386,56 @@ func deletePodsSync(f *framework.Framework, pods []*api.Pod) {
 }
 
 // newTestPods creates a list of pods (specification) for test.
-func newTestPods(numPods int, imageName, podType string) []*api.Pod {
-	var pods []*api.Pod
+func newTestPods(numPods int, volume bool, imageName, podType string) []*v1.Pod {
+	var pods []*v1.Pod
 	for i := 0; i < numPods; i++ {
 		podName := "test-" + string(uuid.NewUUID())
 		labels := map[string]string{
 			"type": podType,
 			"name": podName,
 		}
-		pods = append(pods,
-			&api.Pod{
-				ObjectMeta: api.ObjectMeta{
-					Name:   podName,
-					Labels: labels,
-				},
-				Spec: api.PodSpec{
-					// Restart policy is always (default).
-					Containers: []api.Container{
-						{
-							Image: imageName,
-							Name:  podName,
+		if volume {
+			pods = append(pods,
+				&v1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   podName,
+						Labels: labels,
+					},
+					Spec: v1.PodSpec{
+						// Restart policy is always (default).
+						Containers: []v1.Container{
+							{
+								Image: imageName,
+								Name:  podName,
+								VolumeMounts: []v1.VolumeMount{
+									{MountPath: "/test-volume-mnt", Name: podName + "-volume"},
+								},
+							},
+						},
+						Volumes: []v1.Volume{
+							{Name: podName + "-volume", VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}}},
 						},
 					},
-				},
-			})
+				})
+		} else {
+			pods = append(pods,
+				&v1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   podName,
+						Labels: labels,
+					},
+					Spec: v1.PodSpec{
+						// Restart policy is always (default).
+						Containers: []v1.Container{
+							{
+								Image: imageName,
+								Name:  podName,
+							},
+						},
+					},
+				})
+		}
+
 	}
 	return pods
 }
@@ -450,19 +476,16 @@ const (
 	containerdPidFile     = "/run/docker/libcontainerd/docker-containerd.pid"
 )
 
-func getContainerNameForProcess(name, pidFile string) (string, error) {
-	pids, err := getPidsForProcess(name, pidFile)
-	if err != nil {
-		return "", fmt.Errorf("failed to detect process id for %q - %v", name, err)
+func getPidsForProcess(name, pidFile string) ([]int, error) {
+	if len(pidFile) > 0 {
+		if pid, err := getPidFromPidFile(pidFile); err == nil {
+			return []int{pid}, nil
+		} else {
+			// log the error and fall back to pidof
+			runtime.HandleError(err)
+		}
 	}
-	if len(pids) == 0 {
-		return "", nil
-	}
-	cont, err := getContainer(pids[0])
-	if err != nil {
-		return "", err
-	}
-	return cont, nil
+	return procfs.PidOf(name)
 }
 
 func getPidFromPidFile(pidFile string) (int, error) {
@@ -485,31 +508,19 @@ func getPidFromPidFile(pidFile string) (int, error) {
 	return pid, nil
 }
 
-func getPidsForProcess(name, pidFile string) ([]int, error) {
-	if len(pidFile) > 0 {
-		if pid, err := getPidFromPidFile(pidFile); err == nil {
-			return []int{pid}, nil
-		} else {
-			// log the error and fall back to pidof
-			runtime.HandleError(err)
-		}
-	}
-
-	out, err := exec.Command("pidof", name).Output()
+func getContainerNameForProcess(name, pidFile string) (string, error) {
+	pids, err := getPidsForProcess(name, pidFile)
 	if err != nil {
-		return []int{}, fmt.Errorf("failed to find pid of %q: %v", name, err)
+		return "", fmt.Errorf("failed to detect process id for %q - %v", name, err)
 	}
-
-	// The output of pidof is a list of pids.
-	pids := []int{}
-	for _, pidStr := range strings.Split(strings.TrimSpace(string(out)), " ") {
-		pid, err := strconv.Atoi(pidStr)
-		if err != nil {
-			continue
-		}
-		pids = append(pids, pid)
+	if len(pids) == 0 {
+		return "", nil
 	}
-	return pids, nil
+	cont, err := getContainer(pids[0])
+	if err != nil {
+		return "", err
+	}
+	return cont, nil
 }
 
 // getContainer returns the cgroup associated with the specified pid.

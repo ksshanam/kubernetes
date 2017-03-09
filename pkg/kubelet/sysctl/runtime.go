@@ -19,7 +19,7 @@ package sysctl
 import (
 	"fmt"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/dockertools"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
@@ -27,6 +27,10 @@ import (
 
 const (
 	UnsupportedReason = "SysctlUnsupported"
+	// CRI uses semver-compatible API version, while docker does not
+	// (e.g., 1.24). Append the version with a ".0" so that it works
+	// with both the CRI and dockertools comparison logic.
+	dockerMinimumAPIVersion = "1.24.0"
 )
 
 type runtimeAdmitHandler struct {
@@ -45,7 +49,7 @@ func NewRuntimeAdmitHandler(runtime container.Runtime) (*runtimeAdmitHandler, er
 		}
 
 		// only Docker >= 1.12 supports sysctls
-		c, err := v.Compare(dockertools.DockerV112APIVersion)
+		c, err := v.Compare(dockerMinimumAPIVersion)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compare Docker version for sysctl support: %v", err)
 		}
@@ -77,7 +81,7 @@ func NewRuntimeAdmitHandler(runtime container.Runtime) (*runtimeAdmitHandler, er
 
 // Admit checks whether the runtime supports sysctls.
 func (w *runtimeAdmitHandler) Admit(attrs *lifecycle.PodAdmitAttributes) lifecycle.PodAdmitResult {
-	sysctls, unsafeSysctls, err := api.SysctlsFromPodAnnotations(attrs.Pod.Annotations)
+	sysctls, unsafeSysctls, err := v1.SysctlsFromPodAnnotations(attrs.Pod.Annotations)
 	if err != nil {
 		return lifecycle.PodAdmitResult{
 			Admit:   false,

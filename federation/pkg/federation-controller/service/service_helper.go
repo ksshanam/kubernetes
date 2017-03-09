@@ -17,13 +17,13 @@ limitations under the License.
 package service
 
 import (
-	"fmt"
 	"time"
 
-	federation_release_1_4 "k8s.io/kubernetes/federation/client/clientset_generated/federation_release_1_4"
-	"k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	cache "k8s.io/client-go/tools/cache"
+	fedclientset "k8s.io/kubernetes/federation/client/clientset_generated/federation_clientset"
 	v1 "k8s.io/kubernetes/pkg/api/v1"
-	cache "k8s.io/kubernetes/pkg/client/cache"
 	"k8s.io/kubernetes/pkg/controller"
 
 	"reflect"
@@ -35,16 +35,36 @@ import (
 // worker runs a worker thread that just dequeues items, processes them, and marks them done.
 // It enforces that the syncHandler is never invoked concurrently with the same key.
 func (sc *ServiceController) clusterServiceWorker() {
-	fedClient := sc.federationClient
+	// process all pending events in serviceWorkerDoneChan
+ForLoop:
+	for {
+		select {
+		case clusterName := <-sc.serviceWorkerDoneChan:
+			sc.serviceWorkerMap[clusterName] = false
+		default:
+			// non-blocking, comes here if all existing events are processed
+			break ForLoop
+		}
+	}
+
 	for clusterName, cache := range sc.clusterCache.clientMap {
+		workerExist, found := sc.serviceWorkerMap[clusterName]
+		if found && workerExist {
+			continue
+		}
+
+		// create a worker only if the previous worker has finished and gone out of scope
 		go func(cache *clusterCache, clusterName string) {
+			fedClient := sc.federationClient
 			for {
 				func() {
 					key, quit := cache.serviceQueue.Get()
-					defer cache.serviceQueue.Done(key)
 					if quit {
+						// send signal that current worker has finished tasks and is going out of scope
+						sc.serviceWorkerDoneChan <- clusterName
 						return
 					}
+					defer cache.serviceQueue.Done(key)
 					err := sc.clusterCache.syncService(key.(string), clusterName, cache, sc.serviceCache, fedClient, sc)
 					if err != nil {
 						glog.Errorf("Failed to sync service: %+v", err)
@@ -52,42 +72,38 @@ func (sc *ServiceController) clusterServiceWorker() {
 				}()
 			}
 		}(cache, clusterName)
+		sc.serviceWorkerMap[clusterName] = true
 	}
 }
 
 // Whenever there is change on service, the federation service should be updated
-func (cc *clusterClientCache) syncService(key, clusterName string, clusterCache *clusterCache, serviceCache *serviceCache, fedClient federation_release_1_4.Interface, sc *ServiceController) error {
+func (cc *clusterClientCache) syncService(key, clusterName string, clusterCache *clusterCache, serviceCache *serviceCache, fedClient fedclientset.Interface, sc *ServiceController) error {
 	// obj holds the latest service info from apiserver, return if there is no federation cache for the service
 	cachedService, ok := serviceCache.get(key)
 	if !ok {
 		// if serviceCache does not exists, that means the service is not created by federation, we should skip it
 		return nil
 	}
-	serviceInterface, exists, err := clusterCache.serviceStore.GetByKey(key)
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
-		glog.Infof("Did not successfully get %v from store: %v, will retry later", key, err)
+		glog.Errorf("Did not successfully get %v from store: %v, will retry later", key, err)
 		clusterCache.serviceQueue.Add(key)
 		return err
 	}
 	var needUpdate, isDeletion bool
-	if exists {
-		service, ok := serviceInterface.(*v1.Service)
-		if ok {
-			glog.V(4).Infof("Found service for federation service %s/%s from cluster %s", service.Namespace, service.Name, clusterName)
-			needUpdate = cc.processServiceUpdate(cachedService, service, clusterName)
-		} else {
-			_, ok := serviceInterface.(cache.DeletedFinalStateUnknown)
-			if !ok {
-				return fmt.Errorf("Object contained wasn't a service or a deleted key: %+v", serviceInterface)
-			}
-			glog.Infof("Found tombstone for %v", key)
-			needUpdate = cc.processServiceDeletion(cachedService, clusterName)
-			isDeletion = true
-		}
-	} else {
+	service, err := clusterCache.serviceStore.Services(namespace).Get(name)
+	switch {
+	case errors.IsNotFound(err):
 		glog.Infof("Can not get service %v for cluster %s from serviceStore", key, clusterName)
 		needUpdate = cc.processServiceDeletion(cachedService, clusterName)
 		isDeletion = true
+	case err != nil:
+		glog.Errorf("Did not successfully get %v from store: %v, will retry later", key, err)
+		clusterCache.serviceQueue.Add(key)
+		return err
+	default:
+		glog.V(4).Infof("Found service for federation service %s/%s from cluster %s", service.Namespace, service.Name, clusterName)
+		needUpdate = cc.processServiceUpdate(cachedService, service, clusterName)
 	}
 
 	if needUpdate {
@@ -115,7 +131,7 @@ func (cc *clusterClientCache) syncService(key, clusterName string, clusterCache 
 	if isDeletion {
 		// cachedService is not reliable here as
 		// deleting cache is the last step of federation service deletion
-		_, err := fedClient.Core().Services(cachedService.lastState.Namespace).Get(cachedService.lastState.Name)
+		_, err := fedClient.Core().Services(cachedService.lastState.Namespace).Get(cachedService.lastState.Name, metav1.GetOptions{})
 		// rebuild service if federation service still exists
 		if err == nil || !errors.IsNotFound(err) {
 			return sc.ensureClusterService(cachedService, clusterName, cachedService.appliedState, clusterCache.clientset)
@@ -202,6 +218,7 @@ func (cc *clusterClientCache) processServiceUpdate(cachedService *cachedService,
 			for _, fed := range cachedFedServiceStatus.Ingress {
 				if new.IP == fed.IP && new.Hostname == fed.Hostname {
 					found = true
+					break
 				}
 			}
 			if !found {
@@ -236,12 +253,12 @@ func (cc *clusterClientCache) processServiceUpdate(cachedService *cachedService,
 	return needUpdate
 }
 
-func (cc *clusterClientCache) persistFedServiceUpdate(cachedService *cachedService, fedClient federation_release_1_4.Interface) error {
+func (cc *clusterClientCache) persistFedServiceUpdate(cachedService *cachedService, fedClient fedclientset.Interface) error {
 	service := cachedService.lastState
 	glog.V(5).Infof("Persist federation service status %s/%s", service.Namespace, service.Name)
 	var err error
 	for i := 0; i < clientRetryCount; i++ {
-		_, err := fedClient.Core().Services(service.Namespace).Get(service.Name)
+		_, err := fedClient.Core().Services(service.Namespace).Get(service.Name, metav1.GetOptions{})
 		if errors.IsNotFound(err) {
 			glog.Infof("Not persisting update to service '%s/%s' that no longer exists: %v",
 				service.Namespace, service.Name, err)

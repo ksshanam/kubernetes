@@ -26,11 +26,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"k8s.io/kubernetes/cmd/libs/go2idl/args"
-	"k8s.io/kubernetes/cmd/libs/go2idl/generator"
-	"k8s.io/kubernetes/cmd/libs/go2idl/namer"
-	"k8s.io/kubernetes/cmd/libs/go2idl/parser"
-	"k8s.io/kubernetes/cmd/libs/go2idl/types"
+	"k8s.io/gengo/args"
+	"k8s.io/gengo/generator"
+	"k8s.io/gengo/namer"
+	"k8s.io/gengo/parser"
+	"k8s.io/gengo/types"
 
 	flag "github.com/spf13/pflag"
 )
@@ -39,6 +39,7 @@ type Generator struct {
 	Common               args.GeneratorArgs
 	Packages             string
 	OutputBase           string
+	VendorOutputBase     string
 	ProtoImport          []string
 	Conditional          string
 	Clean                bool
@@ -56,31 +57,39 @@ func New() *Generator {
 	}
 	defaultProtoImport := filepath.Join(sourceTree, "k8s.io", "kubernetes", "vendor", "github.com", "gogo", "protobuf", "protobuf")
 	return &Generator{
-		Common:      common,
-		OutputBase:  sourceTree,
-		ProtoImport: []string{defaultProtoImport},
+		Common:           common,
+		OutputBase:       sourceTree,
+		VendorOutputBase: filepath.Join(sourceTree, "k8s.io", "kubernetes", "vendor"),
+		ProtoImport:      []string{defaultProtoImport},
 		Packages: strings.Join([]string{
-			`+k8s.io/kubernetes/pkg/util/intstr`,
-			`+k8s.io/kubernetes/pkg/api/resource`,
-			`+k8s.io/kubernetes/pkg/runtime`,
-			`+k8s.io/kubernetes/pkg/watch/versioned`,
-			`k8s.io/kubernetes/pkg/api/unversioned`,
+			`+k8s.io/apimachinery/pkg/util/intstr`,
+			`+k8s.io/apimachinery/pkg/api/resource`,
+			`+k8s.io/apimachinery/pkg/runtime/schema`,
+			`+k8s.io/apimachinery/pkg/runtime`,
+			`k8s.io/apimachinery/pkg/apis/meta/v1`,
+			`k8s.io/apiserver/pkg/apis/example/v1`,
 			`k8s.io/kubernetes/pkg/api/v1`,
-			`k8s.io/kubernetes/pkg/apis/policy/v1alpha1`,
+			`k8s.io/kubernetes/pkg/apis/policy/v1beta1`,
 			`k8s.io/kubernetes/pkg/apis/extensions/v1beta1`,
 			`k8s.io/kubernetes/pkg/apis/autoscaling/v1`,
+			`k8s.io/kubernetes/pkg/apis/authorization/v1`,
+			`k8s.io/kubernetes/pkg/apis/autoscaling/v2alpha1`,
 			`k8s.io/kubernetes/pkg/apis/authorization/v1beta1`,
 			`k8s.io/kubernetes/pkg/apis/batch/v1`,
 			`k8s.io/kubernetes/pkg/apis/batch/v2alpha1`,
-			`k8s.io/kubernetes/pkg/apis/apps/v1alpha1`,
+			`k8s.io/kubernetes/pkg/apis/apps/v1beta1`,
+			`k8s.io/kubernetes/pkg/apis/authentication/v1`,
 			`k8s.io/kubernetes/pkg/apis/authentication/v1beta1`,
 			`k8s.io/kubernetes/pkg/apis/rbac/v1alpha1`,
+			`k8s.io/kubernetes/pkg/apis/rbac/v1beta1`,
 			`k8s.io/kubernetes/federation/apis/federation/v1beta1`,
-			`k8s.io/kubernetes/pkg/apis/certificates/v1alpha1`,
+			`k8s.io/kubernetes/pkg/apis/certificates/v1beta1`,
 			`k8s.io/kubernetes/pkg/apis/imagepolicy/v1alpha1`,
+			`k8s.io/kubernetes/pkg/apis/settings/v1alpha1`,
 			`k8s.io/kubernetes/pkg/apis/storage/v1beta1`,
+			`k8s.io/kubernetes/pkg/apis/storage/v1`,
 		}, ","),
-		DropEmbeddedFields: "k8s.io/kubernetes/pkg/api/unversioned.TypeMeta",
+		DropEmbeddedFields: "k8s.io/apimachinery/pkg/apis/meta/v1.TypeMeta",
 	}
 }
 
@@ -138,9 +147,6 @@ func Run(g *Generator) {
 			d = d[1:]
 			outputPackage = false
 		}
-		if strings.Contains(d, "-") {
-			log.Fatalf("Package names must be valid protobuf package identifiers, which allow only [a-z0-9_]: %s", d)
-		}
 		name := protoSafePackage(d)
 		parts := strings.SplitN(d, "=", 2)
 		if len(parts) > 1 {
@@ -190,12 +196,25 @@ func Run(g *Generator) {
 	c.Verify = g.Common.VerifyOnly
 	c.FileTypes["protoidl"] = NewProtoFile()
 
+	var vendoredOutputPackages, localOutputPackages generator.Packages
+	for _, p := range protobufNames.packages {
+		p.Vendored = strings.Contains(c.Universe[p.PackagePath].SourcePath, "/vendor/")
+		if p.Vendored {
+			vendoredOutputPackages = append(vendoredOutputPackages, p)
+		} else {
+			localOutputPackages = append(localOutputPackages, p)
+		}
+	}
+
 	if err := protobufNames.AssignTypesToPackages(c); err != nil {
 		log.Fatalf("Failed to identify Common types: %v", err)
 	}
 
-	if err := c.ExecutePackages(g.OutputBase, outputPackages); err != nil {
-		log.Fatalf("Failed executing generator: %v", err)
+	if err := c.ExecutePackages(g.VendorOutputBase, vendoredOutputPackages); err != nil {
+		log.Fatalf("Failed executing vendor generator: %v", err)
+	}
+	if err := c.ExecutePackages(g.OutputBase, localOutputPackages); err != nil {
+		log.Fatalf("Failed executing local generator: %v", err)
 	}
 
 	if g.OnlyIDL {
@@ -225,6 +244,10 @@ func Run(g *Generator) {
 
 		path := filepath.Join(g.OutputBase, p.ImportPath())
 		outputPath := filepath.Join(g.OutputBase, p.OutputPath())
+		if p.Vendored {
+			path = filepath.Join(g.VendorOutputBase, p.ImportPath())
+			outputPath = filepath.Join(g.VendorOutputBase, p.OutputPath())
+		}
 
 		// generate the gogoprotobuf protoc
 		cmd := exec.Command("protoc", append(args, path)...)
@@ -280,8 +303,11 @@ func Run(g *Generator) {
 			p := outputPackage.(*protobufPackage)
 			p.OmitGogo = true
 		}
-		if err := c.ExecutePackages(g.OutputBase, outputPackages); err != nil {
-			log.Fatalf("Failed executing generator: %v", err)
+		if err := c.ExecutePackages(g.VendorOutputBase, vendoredOutputPackages); err != nil {
+			log.Fatalf("Failed executing vendor generator: %v", err)
+		}
+		if err := c.ExecutePackages(g.OutputBase, localOutputPackages); err != nil {
+			log.Fatalf("Failed executing local generator: %v", err)
 		}
 	}
 
@@ -293,6 +319,9 @@ func Run(g *Generator) {
 		}
 
 		pattern := filepath.Join(g.OutputBase, p.PackagePath, "*.go")
+		if p.Vendored {
+			pattern = filepath.Join(g.VendorOutputBase, p.PackagePath, "*.go")
+		}
 		files, err := filepath.Glob(pattern)
 		if err != nil {
 			log.Fatalf("Can't glob pattern %q: %v", pattern, err)

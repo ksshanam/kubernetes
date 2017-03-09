@@ -21,104 +21,109 @@ import (
 
 	"github.com/golang/glog"
 
-	"k8s.io/kubernetes/pkg/admission"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/apis/storage"
-	"k8s.io/kubernetes/pkg/conversion"
+	storageutil "k8s.io/kubernetes/pkg/apis/storage/util"
+	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/internalversion"
+	"k8s.io/kubernetes/pkg/controller"
 )
 
 func TestAdmission(t *testing.T) {
+	empty := ""
+	foo := "foo"
+
 	defaultClass1 := &storage.StorageClass{
-		TypeMeta: unversioned.TypeMeta{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "StorageClass",
 		},
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "default1",
 			Annotations: map[string]string{
-				isDefaultAnnotation: "true",
+				storageutil.IsDefaultStorageClassAnnotation: "true",
 			},
 		},
 		Provisioner: "default1",
 	}
 	defaultClass2 := &storage.StorageClass{
-		TypeMeta: unversioned.TypeMeta{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "StorageClass",
 		},
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "default2",
 			Annotations: map[string]string{
-				isDefaultAnnotation: "true",
+				storageutil.IsDefaultStorageClassAnnotation: "true",
 			},
 		},
 		Provisioner: "default2",
 	}
 	// Class that has explicit default = false
 	classWithFalseDefault := &storage.StorageClass{
-		TypeMeta: unversioned.TypeMeta{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "StorageClass",
 		},
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "nondefault1",
 			Annotations: map[string]string{
-				isDefaultAnnotation: "false",
+				storageutil.IsDefaultStorageClassAnnotation: "false",
 			},
 		},
 		Provisioner: "nondefault1",
 	}
 	// Class with missing default annotation (=non-default)
 	classWithNoDefault := &storage.StorageClass{
-		TypeMeta: unversioned.TypeMeta{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "StorageClass",
 		},
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "nondefault2",
 		},
 		Provisioner: "nondefault1",
 	}
 	// Class with empty default annotation (=non-default)
 	classWithEmptyDefault := &storage.StorageClass{
-		TypeMeta: unversioned.TypeMeta{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "StorageClass",
 		},
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "nondefault2",
 			Annotations: map[string]string{
-				isDefaultAnnotation: "",
+				storageutil.IsDefaultStorageClassAnnotation: "",
 			},
 		},
 		Provisioner: "nondefault1",
 	}
 
 	claimWithClass := &api.PersistentVolumeClaim{
-		TypeMeta: unversioned.TypeMeta{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "PersistentVolumeClaim",
 		},
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      "claimWithClass",
 			Namespace: "ns",
-			Annotations: map[string]string{
-				classAnnotation: "foo",
-			},
+		},
+		Spec: api.PersistentVolumeClaimSpec{
+			StorageClassName: &foo,
 		},
 	}
 	claimWithEmptyClass := &api.PersistentVolumeClaim{
-		TypeMeta: unversioned.TypeMeta{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "PersistentVolumeClaim",
 		},
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      "claimWithEmptyClass",
 			Namespace: "ns",
-			Annotations: map[string]string{
-				classAnnotation: "",
-			},
+		},
+		Spec: api.PersistentVolumeClaimSpec{
+			StorageClassName: &empty,
 		},
 	}
 	claimWithNoClass := &api.PersistentVolumeClaim{
-		TypeMeta: unversioned.TypeMeta{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "PersistentVolumeClaim",
 		},
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      "claimWithNoClass",
 			Namespace: "ns",
 		},
@@ -186,15 +191,17 @@ func TestAdmission(t *testing.T) {
 		glog.V(4).Infof("starting test %q", test.name)
 
 		// clone the claim, it's going to be modified
-		clone, err := conversion.NewCloner().DeepCopy(test.claim)
+		clone, err := api.Scheme.DeepCopy(test.claim)
 		if err != nil {
 			t.Fatalf("Cannot clone claim: %v", err)
 		}
 		claim := clone.(*api.PersistentVolumeClaim)
 
-		ctrl := newPlugin(nil)
+		ctrl := newPlugin()
+		informerFactory := informers.NewSharedInformerFactory(nil, controller.NoResyncPeriodFunc())
+		ctrl.SetInternalKubeInformerFactory(informerFactory)
 		for _, c := range test.classes {
-			ctrl.store.Add(c)
+			informerFactory.Storage().InternalVersion().StorageClasses().Informer().GetStore().Add(c)
 		}
 		attrs := admission.NewAttributesRecord(
 			claim, // new object
@@ -217,10 +224,8 @@ func TestAdmission(t *testing.T) {
 		}
 
 		class := ""
-		if claim.Annotations != nil {
-			if value, ok := claim.Annotations[classAnnotation]; ok {
-				class = value
-			}
+		if claim.Spec.StorageClassName != nil {
+			class = *claim.Spec.StorageClassName
 		}
 		if test.expectedClassName != "" && test.expectedClassName != class {
 			t.Errorf("Test %q: expected class name %q, got %q", test.name, test.expectedClassName, class)

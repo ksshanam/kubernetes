@@ -29,12 +29,18 @@ func (c *Cloud) findRouteTable(clusterName string) (*ec2.RouteTable, error) {
 	// This should be unnecessary (we already filter on TagNameKubernetesCluster,
 	// and something is broken if cluster name doesn't match, but anyway...
 	// TODO: All clouds should be cluster-aware by default
-	filters := []*ec2.Filter{newEc2Filter("tag:"+TagNameKubernetesCluster, clusterName)}
-	request := &ec2.DescribeRouteTablesInput{Filters: c.addFilters(filters)}
+	request := &ec2.DescribeRouteTablesInput{Filters: c.tagging.addFilters(nil)}
 
-	tables, err := c.ec2.DescribeRouteTables(request)
+	response, err := c.ec2.DescribeRouteTables(request)
 	if err != nil {
 		return nil, err
+	}
+
+	var tables []*ec2.RouteTable
+	for _, table := range response {
+		if c.tagging.hasClusterTag(table.Tags) {
+			tables = append(tables, table)
+		}
 	}
 
 	if len(tables) == 0 {
@@ -86,9 +92,9 @@ func (c *Cloud) ListRoutes(clusterName string) ([]*cloudprovider.Route, error) {
 			glog.Warningf("unable to find instance ID %s in the list of instances being routed to", instanceID)
 			continue
 		}
-		instanceName := orEmpty(instance.PrivateDnsName)
+		nodeName := mapInstanceToNodeName(instance)
 		routeName := clusterName + "-" + destinationCIDR
-		routes = append(routes, &cloudprovider.Route{Name: routeName, TargetInstance: instanceName, DestinationCIDR: destinationCIDR})
+		routes = append(routes, &cloudprovider.Route{Name: routeName, TargetNode: nodeName, DestinationCIDR: destinationCIDR})
 	}
 
 	return routes, nil
@@ -110,7 +116,7 @@ func (c *Cloud) configureInstanceSourceDestCheck(instanceID string, sourceDestCh
 // CreateRoute implements Routes.CreateRoute
 // Create the described route
 func (c *Cloud) CreateRoute(clusterName string, nameHint string, route *cloudprovider.Route) error {
-	instance, err := c.getInstanceByNodeName(route.TargetInstance)
+	instance, err := c.getInstanceByNodeName(route.TargetNode)
 	if err != nil {
 		return err
 	}

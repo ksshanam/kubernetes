@@ -19,13 +19,15 @@ package kubemark
 import (
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
+	clientv1 "k8s.io/client-go/pkg/api/v1"
+	"k8s.io/client-go/tools/record"
 	proxyapp "k8s.io/kubernetes/cmd/kube-proxy/app"
 	"k8s.io/kubernetes/cmd/kube-proxy/app/options"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/record"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	proxyconfig "k8s.io/kubernetes/pkg/proxy/config"
-	"k8s.io/kubernetes/pkg/types"
 	"k8s.io/kubernetes/pkg/util"
 	utiliptables "k8s.io/kubernetes/pkg/util/iptables"
 
@@ -51,7 +53,8 @@ func (*FakeProxier) SyncLoop() {
 
 func NewHollowProxyOrDie(
 	nodeName string,
-	client *client.Client,
+	client clientset.Interface,
+	eventClient v1core.EventsGetter,
 	endpointsConfig *proxyconfig.EndpointsConfig,
 	serviceConfig *proxyconfig.ServiceConfig,
 	iptInterface utiliptables.Interface,
@@ -62,20 +65,20 @@ func NewHollowProxyOrDie(
 	config := options.NewProxyConfig()
 	config.OOMScoreAdj = util.Int32Ptr(0)
 	config.ResourceContainer = ""
-	config.NodeRef = &api.ObjectReference{
+	config.NodeRef = &clientv1.ObjectReference{
 		Kind:      "Node",
 		Name:      nodeName,
 		UID:       types.UID(nodeName),
 		Namespace: "",
 	}
 	proxyconfig.NewSourceAPI(
-		client,
-		30*time.Second,
+		client.Core().RESTClient(),
+		15*time.Minute,
 		serviceConfig.Channel("api"),
 		endpointsConfig.Channel("api"),
 	)
 
-	hollowProxy, err := proxyapp.NewProxyServer(client, config, iptInterface, &FakeProxier{}, broadcaster, recorder, nil, "fake")
+	hollowProxy, err := proxyapp.NewProxyServer(client, eventClient, config, iptInterface, &FakeProxier{}, broadcaster, recorder, nil, "fake")
 	if err != nil {
 		glog.Fatalf("Error while creating ProxyServer: %v\n", err)
 	}

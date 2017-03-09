@@ -18,67 +18,114 @@ limitations under the License.
 package rbac
 
 import (
-	"k8s.io/kubernetes/pkg/api"
+	"fmt"
+
+	"github.com/golang/glog"
+
+	"bytes"
+
+	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/kubernetes/pkg/apis/rbac"
-	"k8s.io/kubernetes/pkg/apis/rbac/validation"
-	"k8s.io/kubernetes/pkg/auth/authorizer"
-	"k8s.io/kubernetes/pkg/registry/clusterrole"
-	"k8s.io/kubernetes/pkg/registry/clusterrolebinding"
-	"k8s.io/kubernetes/pkg/registry/role"
-	"k8s.io/kubernetes/pkg/registry/rolebinding"
+	rbacregistryvalidation "k8s.io/kubernetes/pkg/registry/rbac/validation"
 )
 
-type RBACAuthorizer struct {
-	superUser string
-
-	authorizationRuleResolver validation.AuthorizationRuleResolver
+type RequestToRuleMapper interface {
+	// RulesFor returns all known PolicyRules and any errors that happened while locating those rules.
+	// Any rule returned is still valid, since rules are deny by default.  If you can pass with the rules
+	// supplied, you do not have to fail the request.  If you cannot, you should indicate the error along
+	// with your denial.
+	RulesFor(subject user.Info, namespace string) ([]rbac.PolicyRule, error)
 }
 
-func (r *RBACAuthorizer) Authorize(attr authorizer.Attributes) (bool, string, error) {
-	if r.superUser != "" && attr.GetUser() != nil && attr.GetUser().GetName() == r.superUser {
+type RBACAuthorizer struct {
+	authorizationRuleResolver RequestToRuleMapper
+}
+
+func (r *RBACAuthorizer) Authorize(requestAttributes authorizer.Attributes) (bool, string, error) {
+	rules, ruleResolutionError := r.authorizationRuleResolver.RulesFor(requestAttributes.GetUser(), requestAttributes.GetNamespace())
+	if RulesAllow(requestAttributes, rules...) {
 		return true, "", nil
 	}
 
-	ctx := api.WithNamespace(api.WithUser(api.NewContext(), attr.GetUser()), attr.GetNamespace())
+	// Build a detailed log of the denial.
+	// Make the whole block conditional so we don't do a lot of string-building we won't use.
+	if glog.V(2) {
+		var operation string
+		if requestAttributes.IsResourceRequest() {
+			b := &bytes.Buffer{}
+			b.WriteString(`"`)
+			b.WriteString(requestAttributes.GetVerb())
+			b.WriteString(`" resource "`)
+			b.WriteString(requestAttributes.GetResource())
+			if len(requestAttributes.GetAPIGroup()) > 0 {
+				b.WriteString(`.`)
+				b.WriteString(requestAttributes.GetAPIGroup())
+			}
+			if len(requestAttributes.GetSubresource()) > 0 {
+				b.WriteString(`/`)
+				b.WriteString(requestAttributes.GetSubresource())
+			}
+			b.WriteString(`"`)
+			if len(requestAttributes.GetName()) > 0 {
+				b.WriteString(` named "`)
+				b.WriteString(requestAttributes.GetName())
+				b.WriteString(`"`)
+			}
+			operation = b.String()
+		} else {
+			operation = fmt.Sprintf("%q nonResourceURL %q", requestAttributes.GetVerb(), requestAttributes.GetPath())
+		}
 
-	// Frame the authorization request as a privilege escalation check.
-	var requestedRule rbac.PolicyRule
-	if attr.IsResourceRequest() {
-		resource := attr.GetResource()
-		if len(attr.GetSubresource()) > 0 {
-			resource = attr.GetResource() + "/" + attr.GetSubresource()
+		var scope string
+		if ns := requestAttributes.GetNamespace(); len(ns) > 0 {
+			scope = fmt.Sprintf("in namespace %q", ns)
+		} else {
+			scope = "cluster-wide"
 		}
-		requestedRule = rbac.PolicyRule{
-			Verbs:         []string{attr.GetVerb()},
-			APIGroups:     []string{attr.GetAPIGroup()}, // TODO(ericchiang): add api version here too?
-			Resources:     []string{resource},
-			ResourceNames: []string{attr.GetName()},
-		}
-	} else {
-		requestedRule = rbac.PolicyRule{
-			Verbs:           []string{attr.GetVerb()},
-			NonResourceURLs: []string{attr.GetPath()},
-		}
+
+		glog.Infof("RBAC DENY: user %q groups %v cannot %s %s", requestAttributes.GetUser().GetName(), requestAttributes.GetUser().GetGroups(), operation, scope)
 	}
 
-	// TODO(nhlfr): Try to find more lightweight way to check attributes than escalation checks.
-	err := validation.ConfirmNoEscalation(ctx, r.authorizationRuleResolver, []rbac.PolicyRule{requestedRule})
-	if err != nil {
-		return false, err.Error(), nil
+	reason := ""
+	if ruleResolutionError != nil {
+		reason = fmt.Sprintf("%v", ruleResolutionError)
 	}
-
-	return true, "", nil
+	return false, reason, nil
 }
 
-func New(roleRegistry role.Registry, roleBindingRegistry rolebinding.Registry, clusterRoleRegistry clusterrole.Registry, clusterRoleBindingRegistry clusterrolebinding.Registry, superUser string) *RBACAuthorizer {
+func New(roles rbacregistryvalidation.RoleGetter, roleBindings rbacregistryvalidation.RoleBindingLister, clusterRoles rbacregistryvalidation.ClusterRoleGetter, clusterRoleBindings rbacregistryvalidation.ClusterRoleBindingLister) *RBACAuthorizer {
 	authorizer := &RBACAuthorizer{
-		superUser: superUser,
-		authorizationRuleResolver: validation.NewDefaultRuleResolver(
-			roleRegistry,
-			roleBindingRegistry,
-			clusterRoleRegistry,
-			clusterRoleBindingRegistry,
+		authorizationRuleResolver: rbacregistryvalidation.NewDefaultRuleResolver(
+			roles, roleBindings, clusterRoles, clusterRoleBindings,
 		),
 	}
 	return authorizer
+}
+
+func RulesAllow(requestAttributes authorizer.Attributes, rules ...rbac.PolicyRule) bool {
+	for _, rule := range rules {
+		if RuleAllows(requestAttributes, rule) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func RuleAllows(requestAttributes authorizer.Attributes, rule rbac.PolicyRule) bool {
+	if requestAttributes.IsResourceRequest() {
+		resource := requestAttributes.GetResource()
+		if len(requestAttributes.GetSubresource()) > 0 {
+			resource = requestAttributes.GetResource() + "/" + requestAttributes.GetSubresource()
+		}
+
+		return rbac.VerbMatches(rule, requestAttributes.GetVerb()) &&
+			rbac.APIGroupMatches(rule, requestAttributes.GetAPIGroup()) &&
+			rbac.ResourceMatches(rule, resource) &&
+			rbac.ResourceNameMatches(rule, requestAttributes.GetName())
+	}
+
+	return rbac.VerbMatches(rule, requestAttributes.GetVerb()) &&
+		rbac.NonResourceURLMatches(rule, requestAttributes.GetPath())
 }

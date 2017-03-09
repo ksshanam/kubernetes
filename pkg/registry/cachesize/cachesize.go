@@ -23,11 +23,14 @@ import (
 	"strings"
 
 	"github.com/golang/glog"
+
+	"k8s.io/apiserver/pkg/registry/generic/registry"
 )
 
 type Resource string
 
 const (
+	APIServices                Resource = "apiservices"
 	CertificateSigningRequests Resource = "certificatesigningrequests"
 	ClusterRoles               Resource = "clusterroles"
 	ClusterRoleBindings        Resource = "clusterrolebindings"
@@ -39,7 +42,7 @@ const (
 	HorizontalPodAutoscalers   Resource = "horizontalpodautoscalers"
 	Ingress                    Resource = "ingress"
 	PodDisruptionBudget        Resource = "poddisruptionbudgets"
-	PetSet                     Resource = "petset"
+	StatefulSet                Resource = "statefulset"
 	Jobs                       Resource = "jobs"
 	LimitRanges                Resource = "limitranges"
 	Namespaces                 Resource = "namespaces"
@@ -52,16 +55,13 @@ const (
 	PodTemplates               Resource = "podtemplates"
 	Replicasets                Resource = "replicasets"
 	ResourceQuotas             Resource = "resourcequotas"
-	ScheduledJobs              Resource = "scheduledjobs"
+	CronJobs                   Resource = "cronjobs"
 	Roles                      Resource = "roles"
 	RoleBindings               Resource = "rolebindings"
 	Secrets                    Resource = "secrets"
 	ServiceAccounts            Resource = "serviceaccounts"
 	Services                   Resource = "services"
 	StorageClasses             Resource = "storageclasses"
-
-	// Default value of watch cache size for a resource if not specified.
-	defaultWatchCacheSize = 100
 )
 
 // TODO: This shouldn't be a global variable.
@@ -87,9 +87,10 @@ func InitializeWatchCacheSizes(expectedRAMCapacityMB int) {
 	// TODO: Figure out which resource we should have non-default value.
 	watchCacheSizes[Controllers] = maxInt(5*clusterSize, 100)
 	watchCacheSizes[Endpoints] = maxInt(10*clusterSize, 1000)
-	watchCacheSizes[Nodes] = maxInt(3*clusterSize, 1000)
-	watchCacheSizes[Pods] = maxInt(10*clusterSize, 1000)
+	watchCacheSizes[Nodes] = maxInt(5*clusterSize, 1000)
+	watchCacheSizes[Pods] = maxInt(50*clusterSize, 1000)
 	watchCacheSizes[Services] = maxInt(5*clusterSize, 1000)
+	watchCacheSizes[APIServices] = maxInt(5*clusterSize, 1000)
 }
 
 func SetWatchCacheSizes(cacheSizes []string) {
@@ -110,11 +111,11 @@ func SetWatchCacheSizes(cacheSizes []string) {
 	}
 }
 
-func GetWatchCacheSizeByResource(resource Resource) int {
-	if value, found := watchCacheSizes[resource]; found {
+func GetWatchCacheSizeByResource(resource string) int { // TODO this should use schema.GroupResource for lookups
+	if value, found := watchCacheSizes[Resource(resource)]; found {
 		return value
 	}
-	return defaultWatchCacheSize
+	return registry.DefaultWatchCacheSize
 }
 
 func maxInt(a, b int) int {

@@ -17,648 +17,380 @@ limitations under the License.
 package e2e
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo"
-	"k8s.io/kubernetes/pkg/api"
-	apierrs "k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/api/testapi"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
+	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/kubernetes/pkg/api/v1"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
 	"k8s.io/kubernetes/test/e2e/framework"
 )
 
-// Delete the nfs-server pod.
-func nfsServerPodCleanup(c *client.Client, config VolumeTestConfig) {
-	defer GinkgoRecover()
-
-	podClient := c.Pods(config.namespace)
-
-	if config.serverImage != "" {
-		podName := config.prefix + "-server"
-		err := podClient.Delete(podName, nil)
-		if err != nil {
-			framework.Logf("Delete of %v pod failed: %v", podName, err)
-		}
-	}
-}
-
-// Delete the PV. Fail test if delete fails. If success the returned PV should
-// be nil, which prevents the AfterEach from attempting to delete it.
-func deletePersistentVolume(c *client.Client, pv *api.PersistentVolume) (*api.PersistentVolume, error) {
-
-	if pv == nil {
-		return nil, fmt.Errorf("PV to be deleted is nil")
-	}
-
-	framework.Logf("Deleting PersistentVolume %v", pv.Name)
-	err := c.PersistentVolumes().Delete(pv.Name)
-	if err != nil {
-		return pv, fmt.Errorf("Delete() PersistentVolume %v failed: %v", pv.Name, err)
-	}
-
-	// Wait for PersistentVolume to delete
-	deleteDuration := 90 * time.Second
-	err = framework.WaitForPersistentVolumeDeleted(c, pv.Name, 3*time.Second, deleteDuration)
-	if err != nil {
-		return pv, fmt.Errorf("Unable to delete PersistentVolume %s after waiting for %v: %v", pv.Name, deleteDuration, err)
-	}
-
-	return nil, nil // success
-}
-
-// Delete the PVC and wait for the PV to become Available again. Validate that
-// the PV has recycled (assumption here about reclaimPolicy). Return the pv and
-// pvc to reflect that these resources have been retrieved again (Get). If the
-// delete is successful the returned pvc should be nil and the pv non-nil.
-// Note: the pv and pvc are returned back to the It() caller so that the
-//   AfterEach func can delete these objects if they are not nil.
-func deletePVCandValidatePV(c *client.Client, ns string, pvc *api.PersistentVolumeClaim, pv *api.PersistentVolume) (*api.PersistentVolume, *api.PersistentVolumeClaim, error) {
-
-	framework.Logf("Deleting PersistentVolumeClaim %v to trigger PV Recycling", pvc.Name)
-	err := c.PersistentVolumeClaims(ns).Delete(pvc.Name)
-	if err != nil {
-		return pv, pvc, fmt.Errorf("Delete of PVC %v failed: %v", pvc.Name, err)
-	}
-
-	// Check that the PVC is really deleted.
-	pvc, err = c.PersistentVolumeClaims(ns).Get(pvc.Name)
-	if err == nil {
-		return pv, pvc, fmt.Errorf("PVC %v deleted yet still exists", pvc.Name)
-	}
-	if !apierrs.IsNotFound(err) {
-		return pv, pvc, fmt.Errorf("Get on deleted PVC %v failed with error other than \"not found\": %v", pvc.Name, err)
-	}
-
-	// Wait for the PV's phase to return to Available
-	framework.Logf("Waiting for recycling process to complete.")
-	err = framework.WaitForPersistentVolumePhase(api.VolumeAvailable, c, pv.Name, 3*time.Second, 300*time.Second)
-	if err != nil {
-		return pv, pvc, fmt.Errorf("Recycling failed: %v", err)
-	}
-
-	// Examine the pv.ClaimRef and UID. Expect nil values.
-	pv, err = c.PersistentVolumes().Get(pv.Name)
-	if err != nil {
-		return pv, pvc, fmt.Errorf("Cannot re-get PersistentVolume %v:", pv.Name)
-	}
-	if pv.Spec.ClaimRef != nil && len(pv.Spec.ClaimRef.UID) > 0 {
-		crJSON, _ := json.Marshal(pv.Spec.ClaimRef)
-		return pv, pvc, fmt.Errorf("Expected PV %v's ClaimRef to be nil, or the claimRef's UID to be blank. Instead claimRef is: %v", pv.Name, string(crJSON))
-	}
-
-	return pv, pvc, nil
-}
-
-// create the PV resource. Fails test on error.
-func createPV(c *client.Client, pv *api.PersistentVolume) (*api.PersistentVolume, error) {
-
-	pv, err := c.PersistentVolumes().Create(pv)
-	if err != nil {
-		return pv, fmt.Errorf("Create PersistentVolume %v failed: %v", pv.Name, err)
-	}
-
-	return pv, nil
-}
-
-// create the PVC resource. Fails test on error.
-func createPVC(c *client.Client, ns string, pvc *api.PersistentVolumeClaim) (*api.PersistentVolumeClaim, error) {
-
-	pvc, err := c.PersistentVolumeClaims(ns).Create(pvc)
-	if err != nil {
-		return pvc, fmt.Errorf("Create PersistentVolumeClaim %v failed: %v", pvc.Name, err)
-	}
-
-	return pvc, nil
-}
-
-// Create a PVC followed by the PV based on the passed in nfs-server ip and
-// namespace. If the "preBind" bool is true then pre-bind the PV to the PVC
-// via the PV's ClaimRef. Return the pv and pvc to reflect the created objects.
-// Note: the pv and pvc are returned back to the It() caller so that the
-//   AfterEach func can delete these objects if they are not nil.
-// Note: in the pre-bind case the real PVC name, which is generated, is not
-//   known until after the PVC is instantiated. This is why the pvc is created
-//   before the pv.
-func createPVCPV(c *client.Client, serverIP, ns string, preBind bool) (*api.PersistentVolume, *api.PersistentVolumeClaim, error) {
-
-	var bindTo *api.PersistentVolumeClaim
-	var preBindMsg string
-
-	// make the pvc definition first
-	pvc := makePersistentVolumeClaim(ns)
-	if preBind {
-		preBindMsg = " pre-bound"
-		bindTo = pvc
-	}
-	// make the pv spec
-	pv := makePersistentVolume(serverIP, bindTo)
-
-	By(fmt.Sprintf("Creating a PVC followed by a%s PV", preBindMsg))
-
-	// instantiate the pvc
-	pvc, err := createPVC(c, ns, pvc)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// instantiate the pvc, handle pre-binding by ClaimRef if needed
-	if preBind {
-		pv.Spec.ClaimRef.Name = pvc.Name
-	}
-	pv, err = createPV(c, pv)
-	if err != nil {
-		return nil, pvc, err
-	}
-
-	return pv, pvc, nil
-}
-
-// Create a PV followed by the PVC based on the passed in nfs-server ip and
-// namespace. If the "preBind" bool is true then pre-bind the PVC to the PV
-// via the PVC's VolumeName. Return the pv and pvc to reflect the created
-// objects.
-// Note: the pv and pvc are returned back to the It() caller so that the
-//   AfterEach func can delete these objects if they are not nil.
-// Note: in the pre-bind case the real PV name, which is generated, is not
-//   known until after the PV is instantiated. This is why the pv is created
-//   before the pvc.
-func createPVPVC(c *client.Client, serverIP, ns string, preBind bool) (*api.PersistentVolume, *api.PersistentVolumeClaim, error) {
-
-	preBindMsg := ""
-	if preBind {
-		preBindMsg = " pre-bound"
-	}
-
-	By(fmt.Sprintf("Creating a PV followed by a%s PVC", preBindMsg))
-
-	// make the pv and pvc definitions
-	pv := makePersistentVolume(serverIP, nil)
-	pvc := makePersistentVolumeClaim(ns)
-
-	// instantiate the pv
-	pv, err := createPV(c, pv)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// instantiate the pvc, handle pre-binding by VolumeName if needed
-	if preBind {
-		pvc.Spec.VolumeName = pv.Name
-	}
-	pvc, err = createPVC(c, ns, pvc)
-	if err != nil {
-		return pv, nil, err
-	}
-
-	return pv, pvc, nil
-}
-
-// Wait for the pv and pvc to bind to each other. Fail test on errors.
-func waitOnPVandPVC(c *client.Client, ns string, pv *api.PersistentVolume, pvc *api.PersistentVolumeClaim) error {
-
-	// Wait for newly created PVC to bind to the PV
-	framework.Logf("Waiting for PV %v to bind to PVC %v", pv.Name, pvc.Name)
-	err := framework.WaitForPersistentVolumeClaimPhase(api.ClaimBound, c, ns, pvc.Name, 3*time.Second, 300*time.Second)
-	if err != nil {
-		return fmt.Errorf("PersistentVolumeClaim failed to enter a bound state: %+v", err)
-	}
-
-	// Wait for PersistentVolume.Status.Phase to be Bound, which it should be
-	// since the PVC is already bound.
-	err = framework.WaitForPersistentVolumePhase(api.VolumeBound, c, pv.Name, 3*time.Second, 300*time.Second)
-	if err != nil {
-		return fmt.Errorf("PersistentVolume failed to enter a bound state even though PVC is Bound: %+v", err)
-	}
-
-	return nil
-}
-
-// Waits for the pv and pvc to be bound to each other, then checks that the pv's
-// claimRef matches the pvc. Fails test on errors. Return the pv and pvc to
-// reflect that these resources have been retrieved again (Get).
-// Note: the pv and pvc are returned back to the It() caller so that the
-//   AfterEach func can delete these objects if they are not nil.
-func waitAndValidatePVandPVC(c *client.Client, ns string, pv *api.PersistentVolume, pvc *api.PersistentVolumeClaim) (*api.PersistentVolume, *api.PersistentVolumeClaim, error) {
-
-	var err error
-
-	// Wait for pv and pvc to bind to each other
-	if err = waitOnPVandPVC(c, ns, pv, pvc); err != nil {
-		return pv, pvc, err
-	}
-
-	// Check that the PersistentVolume.ClaimRef is valid and matches the PVC
-	framework.Logf("Checking PersistentVolume ClaimRef is non-nil")
-	pv, err = c.PersistentVolumes().Get(pv.Name)
-	if err != nil {
-		return pv, pvc, fmt.Errorf("Cannot re-get PersistentVolume %v:", pv.Name)
-	}
-
-	pvc, err = c.PersistentVolumeClaims(ns).Get(pvc.Name)
-	if err != nil {
-		return pv, pvc, fmt.Errorf("Cannot re-get PersistentVolumeClaim %v:", pvc.Name)
-	}
-
-	if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.UID != pvc.UID {
-		pvJSON, _ := json.Marshal(pv.Spec.ClaimRef)
-		return pv, pvc, fmt.Errorf("Expected Bound PersistentVolume %v to have valid ClaimRef: %+v", pv.Name, string(pvJSON))
-	}
-
-	return pv, pvc, nil
-}
-
-// Test the pod's exitcode to be zero.
-func testPodSuccessOrFail(f *framework.Framework, c *client.Client, ns string, pod *api.Pod) error {
-
-	By("Pod should terminate with exitcode 0 (success)")
-
-	err := framework.WaitForPodSuccessInNamespace(c, pod.Name, pod.Spec.Containers[0].Name, ns)
-	if err != nil {
-		return fmt.Errorf("Pod %v returned non-zero exitcode: %+v", pod.Name, err)
-	}
-
-	framework.Logf("pod %v exited successfully", pod.Name)
-	return nil
-}
-
-// Delete the passed in pod.
-func deletePod(f *framework.Framework, c *client.Client, ns string, pod *api.Pod) error {
-
-	framework.Logf("Deleting pod %v", pod.Name)
-	err := c.Pods(ns).Delete(pod.Name, nil)
-	if err != nil {
-		return fmt.Errorf("Pod %v encountered a delete error: %v", pod.Name, err)
-	}
-
-	// Wait for pod to terminate
-	err = f.WaitForPodTerminated(pod.Name, "")
-	if err != nil && !apierrs.IsNotFound(err) {
-		return fmt.Errorf("Pod %v will not teminate: %v", pod.Name, err)
-	}
-
-	// Re-get the pod to double check that it has been deleted; expect err
-	// Note: Get() writes a log error if the pod is not found
-	_, err = c.Pods(ns).Get(pod.Name)
-	if err == nil {
-		return fmt.Errorf("Pod %v has been deleted but able to re-Get the deleted pod", pod.Name)
-	}
-	if !apierrs.IsNotFound(err) {
-		return fmt.Errorf("Pod %v has been deleted but still exists: %v", pod.Name, err)
-	}
-
-	framework.Logf("Ignore \"not found\" error above. Pod %v successfully deleted", pod.Name)
-	return nil
-}
-
-// Create the test pod, wait for (hopefully) success, and then delete the pod.
-func createWaitAndDeletePod(f *framework.Framework, c *client.Client, ns string, claimName string) error {
-
-	var errmsg string
-
-	framework.Logf("Creating nfs test pod")
-
-	// Make pod spec
-	pod := makeWritePod(ns, claimName)
-
-	// Instantiate pod (Create)
-	runPod, err := c.Pods(ns).Create(pod)
-	if err != nil || runPod == nil {
-		name := ""
-		if runPod != nil {
-			name = runPod.Name
-		}
-		return fmt.Errorf("Create test pod %v failed: %v", name, err)
-	}
-
-	// Wait for the test pod to complete its lifecycle
-	podErr := testPodSuccessOrFail(f, c, ns, runPod)
-
-	// Regardless of podErr above, delete the pod if it exists
-	if runPod != nil {
-		err = deletePod(f, c, ns, runPod)
-	}
-
-	// Check results of pod success and pod delete
-	if podErr != nil {
-		errmsg = fmt.Sprintf("Pod %v exited with non-zero exitcode: %v", runPod.Name, podErr)
-	}
-	if err != nil { // Delete error
-		if len(errmsg) > 0 {
-			errmsg += "; and "
-		}
-		errmsg += fmt.Sprintf("Delete error on pod %v: %v", runPod.Name, err)
-	}
-
-	if len(errmsg) > 0 {
-		return fmt.Errorf(errmsg)
-	}
-
-	return nil
-}
-
-// validate PV/PVC, create and verify writer pod, delete PVC and PV. Ensure
-// all of these steps were successful. Return the pv and pvc to reflect that
-// these resources have been retrieved again (Get).
-// Note: the pv and pvc are returned back to the It() caller so that the
-//   AfterEach func can delete these objects if they are not nil.
-func completeTest(f *framework.Framework, c *client.Client, ns string, pv *api.PersistentVolume, pvc *api.PersistentVolumeClaim) (*api.PersistentVolume, *api.PersistentVolumeClaim, error) {
-
-	// 1. verify that the PV and PVC have binded correctly
+// Validate PV/PVC, create and verify writer pod, delete the PVC, and validate the PV's
+// phase. Note: the PV is deleted in the AfterEach, not here.
+func completeTest(f *framework.Framework, c clientset.Interface, ns string, pv *v1.PersistentVolume, pvc *v1.PersistentVolumeClaim) {
+
+	// 1. verify that the PV and PVC have bound correctly
 	By("Validating the PV-PVC binding")
-	pv, pvc, err := waitAndValidatePVandPVC(c, ns, pv, pvc)
-	if err != nil {
-		return pv, pvc, err
-	}
+	framework.WaitOnPVandPVC(c, ns, pv, pvc)
 
 	// 2. create the nfs writer pod, test if the write was successful,
 	//    then delete the pod and verify that it was deleted
 	By("Checking pod has write access to PersistentVolume")
-	if err = createWaitAndDeletePod(f, c, ns, pvc.Name); err != nil {
-		return pv, pvc, err
-	}
+	framework.CreateWaitAndDeletePod(f, c, ns, pvc.Name)
 
-	// 3. delete the PVC before deleting PV, wait for PV to be "Available"
-	By("Deleting the PVC to invoke the recycler")
-	pv, pvc, err = deletePVCandValidatePV(c, ns, pvc, pv)
-	if err != nil {
-		return pv, pvc, err
-	}
-
-	// 4. cleanup by deleting the pv
-	By("Deleting the PV")
-	if pv, err = deletePersistentVolume(c, pv); err != nil {
-		return pv, pvc, err
-	}
-
-	return pv, pvc, nil
+	// 3. delete the PVC, wait for PV to become "Released"
+	By("Deleting the PVC to invoke the reclaim policy.")
+	framework.DeletePVCandValidatePV(c, ns, pvc, pv, v1.VolumeReleased)
 }
 
-var _ = framework.KubeDescribe("PersistentVolumes", func() {
+// Validate pairs of PVs and PVCs, create and verify writer pod, delete PVC and validate
+// PV. Ensure each step succeeds.
+// Note: the PV is deleted in the AfterEach, not here.
+// Note: this func is serialized, we wait for each pod to be deleted before creating the
+//   next pod. Adding concurrency is a TODO item.
+func completeMultiTest(f *framework.Framework, c clientset.Interface, ns string, pvols framework.PVMap, claims framework.PVCMap, expectPhase v1.PersistentVolumePhase) {
 
-	// global vars for the It() tests below
-	f := framework.NewDefaultFramework("pv")
-	var c *client.Client
-	var ns string
-	var NFSconfig VolumeTestConfig
-	var serverIP string
-	var nfsServerPod *api.Pod
-	var pv *api.PersistentVolume
-	var pvc *api.PersistentVolumeClaim
-	var err error
+	// 1. verify each PV permits write access to a client pod
+	By("Checking pod has write access to PersistentVolumes")
+	for pvcKey := range claims {
+		pvc, err := c.Core().PersistentVolumeClaims(pvcKey.Namespace).Get(pvcKey.Name, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		if len(pvc.Spec.VolumeName) == 0 {
+			continue // claim is not bound
+		}
+		// sanity test to ensure our maps are in sync
+		_, found := pvols[pvc.Spec.VolumeName]
+		Expect(found).To(BeTrue())
+		// TODO: currently a serialized test of each PV
+		framework.CreateWaitAndDeletePod(f, c, pvcKey.Namespace, pvcKey.Name)
+	}
 
-	// config for the nfs-server pod in the default namespace
-	NFSconfig = VolumeTestConfig{
-		namespace:   api.NamespaceDefault,
+	// 2. delete each PVC, wait for its bound PV to reach `expectedPhase`
+	By("Deleting PVCs to invoke recycler")
+	framework.DeletePVCandValidatePVGroup(c, ns, pvols, claims, expectPhase)
+}
+
+// Creates a PV, PVC, and ClientPod that will run until killed by test or clean up.
+func initializeGCETestSpec(c clientset.Interface, ns string, pvConfig framework.PersistentVolumeConfig, isPrebound bool) (*v1.Pod, *v1.PersistentVolume, *v1.PersistentVolumeClaim) {
+	By("Creating the PV and PVC")
+	pv, pvc := framework.CreatePVPVC(c, pvConfig, ns, isPrebound)
+	framework.WaitOnPVandPVC(c, ns, pv, pvc)
+
+	By("Creating the Client Pod")
+	clientPod := framework.CreateClientPod(c, ns, pvc)
+	return clientPod, pv, pvc
+}
+
+// initNFSserverPod wraps volumes.go's startVolumeServer to return a running nfs host pod
+// commonly used by persistent volume testing
+func initNFSserverPod(c clientset.Interface, ns string) *v1.Pod {
+	return startVolumeServer(c, VolumeTestConfig{
+		namespace:   ns,
 		prefix:      "nfs",
-		serverImage: "gcr.io/google_containers/volume-nfs:0.7",
+		serverImage: NfsServerImage,
 		serverPorts: []int{2049},
 		serverArgs:  []string{"-G", "777", "/exports"},
-	}
+	})
+}
+
+var _ = framework.KubeDescribe("PersistentVolumes [Volume][Serial]", func() {
+
+	// global vars for the Context()s and It()'s below
+	f := framework.NewDefaultFramework("pv")
+	var c clientset.Interface
+	var ns string
 
 	BeforeEach(func() {
-		c = f.Client
+		c = f.ClientSet
 		ns = f.Namespace.Name
-
-		// If it doesn't exist, create the nfs server pod in "default" ns
-		// The "default" ns is used so that individual tests can delete
-		// their ns without impacting the nfs-server pod.
-		if nfsServerPod == nil {
-			nfsServerPod = startVolumeServer(c, NFSconfig)
-			serverIP = nfsServerPod.Status.PodIP
-			framework.Logf("NFS server IP address: %v", serverIP)
-		}
 	})
 
-	AfterEach(func() {
-		if c != nil && len(ns) > 0 { // still have client and namespace
-			if pvc != nil && len(pvc.Name) > 0 {
-				// Delete the PersistentVolumeClaim
-				framework.Logf("AfterEach: PVC %v is non-nil, deleting claim", pvc.Name)
-				err := c.PersistentVolumeClaims(ns).Delete(pvc.Name)
-				if err != nil && !apierrs.IsNotFound(err) {
-					framework.Logf("AfterEach: delete of PersistentVolumeClaim %v error: %v", pvc.Name, err)
-				}
-				pvc = nil
+	///////////////////////////////////////////////////////////////////////
+	//				NFS
+	///////////////////////////////////////////////////////////////////////
+	// Testing configurations of a single a PV/PVC pair, multiple evenly paired PVs/PVCs,
+	// and multiple unevenly paired PV/PVCs
+	framework.KubeDescribe("PersistentVolumes:NFS[Flaky]", func() {
+
+		var (
+			nfsServerPod *v1.Pod
+			serverIP     string
+			pvConfig     framework.PersistentVolumeConfig
+		)
+
+		BeforeEach(func() {
+			framework.Logf("[BeforeEach] Creating NFS Server Pod")
+			nfsServerPod = initNFSserverPod(c, ns)
+			serverIP = nfsServerPod.Status.PodIP
+			framework.Logf("[BeforeEach] Configuring PersistentVolume")
+			pvConfig = framework.PersistentVolumeConfig{
+				NamePrefix: "nfs-",
+				PVSource: v1.PersistentVolumeSource{
+					NFS: &v1.NFSVolumeSource{
+						Server:   serverIP,
+						Path:     "/exports",
+						ReadOnly: false,
+					},
+				},
 			}
-			if pv != nil && len(pv.Name) > 0 {
-				framework.Logf("AfterEach: PV %v is non-nil, deleting pv", pv.Name)
-				err := c.PersistentVolumes().Delete(pv.Name)
-				if err != nil && !apierrs.IsNotFound(err) {
-					framework.Logf("AfterEach: delete of PersistentVolume %v error: %v", pv.Name, err)
+		})
+
+		AfterEach(func() {
+			framework.DeletePodWithWait(f, c, nfsServerPod)
+		})
+
+		Context("with Single PV - PVC pairs", func() {
+
+			var pv *v1.PersistentVolume
+			var pvc *v1.PersistentVolumeClaim
+
+			// Note: this is the only code where the pv is deleted.
+			AfterEach(func() {
+				framework.Logf("AfterEach: Cleaning up test resources.")
+				framework.PVPVCCleanup(c, ns, pv, pvc)
+			})
+
+			// Individual tests follow:
+			//
+			// Create an nfs PV, then a claim that matches the PV, and a pod that
+			// contains the claim. Verify that the PV and PVC bind correctly, and
+			// that the pod can write to the nfs volume.
+			It("should create a non-pre-bound PV and PVC: test write access ", func() {
+				pv, pvc = framework.CreatePVPVC(c, pvConfig, ns, false)
+				completeTest(f, c, ns, pv, pvc)
+			})
+
+			// Create a claim first, then a nfs PV that matches the claim, and a
+			// pod that contains the claim. Verify that the PV and PVC bind
+			// correctly, and that the pod can write to the nfs volume.
+			It("create a PVC and non-pre-bound PV: test write access", func() {
+				pv, pvc = framework.CreatePVCPV(c, pvConfig, ns, false)
+				completeTest(f, c, ns, pv, pvc)
+			})
+
+			// Create a claim first, then a pre-bound nfs PV that matches the claim,
+			// and a pod that contains the claim. Verify that the PV and PVC bind
+			// correctly, and that the pod can write to the nfs volume.
+			It("create a PVC and a pre-bound PV: test write access", func() {
+				pv, pvc = framework.CreatePVCPV(c, pvConfig, ns, true)
+				completeTest(f, c, ns, pv, pvc)
+			})
+
+			// Create a nfs PV first, then a pre-bound PVC that matches the PV,
+			// and a pod that contains the claim. Verify that the PV and PVC bind
+			// correctly, and that the pod can write to the nfs volume.
+			It("create a PV and a pre-bound PVC: test write access", func() {
+				pv, pvc = framework.CreatePVPVC(c, pvConfig, ns, true)
+				completeTest(f, c, ns, pv, pvc)
+			})
+		})
+
+		// Create multiple pvs and pvcs, all in the same namespace. The PVs-PVCs are
+		// verified to bind, though it's not known in advanced which PV will bind to
+		// which claim. For each pv-pvc pair create a pod that writes to the nfs mount.
+		// Note: when the number of PVs exceeds the number of PVCs the max binding wait
+		//   time will occur for each PV in excess. This is expected but the delta
+		//   should be kept small so that the tests aren't unnecessarily slow.
+		// Note: future tests may wish to incorporate the following:
+		//   a) pre-binding, b) create pvcs before pvs, c) create pvcs and pods
+		//   in different namespaces.
+		Context("with multiple PVs and PVCs all in same ns", func() {
+
+			// define the maximum number of PVs and PVCs supported by these tests
+			const maxNumPVs = 10
+			const maxNumPVCs = 10
+			// create the pv and pvc maps to be reused in the It blocks
+			pvols := make(framework.PVMap, maxNumPVs)
+			claims := make(framework.PVCMap, maxNumPVCs)
+
+			AfterEach(func() {
+				framework.Logf("AfterEach: deleting %v PVCs and %v PVs...", len(claims), len(pvols))
+				framework.PVPVCMapCleanup(c, ns, pvols, claims)
+			})
+
+			// Create 2 PVs and 4 PVCs.
+			// Note: PVs are created before claims and no pre-binding
+			It("should create 2 PVs and 4 PVCs: test write access", func() {
+				numPVs, numPVCs := 2, 4
+				pvols, claims = framework.CreatePVsPVCs(numPVs, numPVCs, c, ns, pvConfig)
+				framework.WaitAndVerifyBinds(c, ns, pvols, claims, true)
+				completeMultiTest(f, c, ns, pvols, claims, v1.VolumeReleased)
+			})
+
+			// Create 3 PVs and 3 PVCs.
+			// Note: PVs are created before claims and no pre-binding
+			It("should create 3 PVs and 3 PVCs: test write access", func() {
+				numPVs, numPVCs := 3, 3
+				pvols, claims = framework.CreatePVsPVCs(numPVs, numPVCs, c, ns, pvConfig)
+				framework.WaitAndVerifyBinds(c, ns, pvols, claims, true)
+				completeMultiTest(f, c, ns, pvols, claims, v1.VolumeReleased)
+			})
+
+			// Create 4 PVs and 2 PVCs.
+			// Note: PVs are created before claims and no pre-binding.
+			It("should create 4 PVs and 2 PVCs: test write access", func() {
+				numPVs, numPVCs := 4, 2
+				pvols, claims = framework.CreatePVsPVCs(numPVs, numPVCs, c, ns, pvConfig)
+				framework.WaitAndVerifyBinds(c, ns, pvols, claims, true)
+				completeMultiTest(f, c, ns, pvols, claims, v1.VolumeReleased)
+			})
+		})
+
+		// This Context isolates and tests the "Recycle" reclaim behavior.  On deprecation of the
+		// Recycler, this entire context can be removed without affecting the test suite or leaving behind
+		// dead code.
+		Context("when invoking the Recycle reclaim policy", func() {
+			var pv *v1.PersistentVolume
+			var pvc *v1.PersistentVolumeClaim
+
+			BeforeEach(func() {
+				pvConfig.ReclaimPolicy = v1.PersistentVolumeReclaimRecycle
+				pv, pvc = framework.CreatePVPVC(c, pvConfig, ns, false)
+				framework.WaitOnPVandPVC(c, ns, pv, pvc)
+			})
+
+			AfterEach(func() {
+				framework.Logf("AfterEach: Cleaning up test resources.")
+				framework.PVPVCCleanup(c, ns, pv, pvc)
+			})
+
+			// This It() tests a scenario where a PV is written to by a Pod, recycled, then the volume checked
+			// for files. If files are found, the checking Pod fails, failing the test.  Otherwise, the pod
+			// (and test) succeed.
+			It("should test that a PV becomes Available and is clean after the PVC is deleted. [Volume][Serial][Flaky]", func() {
+				By("Writing to the volume.")
+				pod := framework.MakeWritePod(ns, pvc.Name)
+				pod, err := c.Core().Pods(ns).Create(pod)
+				Expect(err).NotTo(HaveOccurred())
+				err = framework.WaitForPodSuccessInNamespace(c, pod.Name, ns)
+				Expect(err).NotTo(HaveOccurred())
+
+				framework.DeletePVCandValidatePV(c, ns, pvc, pv, v1.VolumeAvailable)
+
+				By("Re-mounting the volume.")
+				pvc = framework.MakePersistentVolumeClaim(ns)
+				pvc = framework.CreatePVC(c, ns, pvc)
+				err = framework.WaitForPersistentVolumeClaimPhase(v1.ClaimBound, c, ns, pvc.Name, 2*time.Second, 60*time.Second)
+				Expect(err).NotTo(HaveOccurred())
+
+				// If a file is detected in /mnt, fail the pod and do not restart it.
+				By("Verifying the mount has been cleaned.")
+				mount := pod.Spec.Containers[0].VolumeMounts[0].MountPath
+				pod = framework.MakePod(ns, pvc.Name, true, fmt.Sprintf("[ $(ls -A %s | wc -l) -eq 0 ] && exit 0 || exit 1", mount))
+
+				pod, err = c.Core().Pods(ns).Create(pod)
+				Expect(err).NotTo(HaveOccurred())
+				err = framework.WaitForPodSuccessInNamespace(c, pod.Name, ns)
+				Expect(err).NotTo(HaveOccurred())
+				framework.Logf("Pod exited without failure; the volume has been recycled.")
+			})
+		})
+	})
+	///////////////////////////////////////////////////////////////////////
+	//				GCE PD
+	///////////////////////////////////////////////////////////////////////
+	// Testing configurations of single a PV/PVC pair attached to a GCE PD
+	framework.KubeDescribe("PersistentVolumes:GCEPD", func() {
+
+		var (
+			diskName  string
+			node      types.NodeName
+			err       error
+			pv        *v1.PersistentVolume
+			pvc       *v1.PersistentVolumeClaim
+			clientPod *v1.Pod
+			pvConfig  framework.PersistentVolumeConfig
+		)
+
+		BeforeEach(func() {
+			framework.SkipUnlessProviderIs("gce")
+			By("Initializing Test Spec")
+			if diskName == "" {
+				diskName, err = framework.CreatePDWithRetry()
+				Expect(err).NotTo(HaveOccurred())
+				pvConfig = framework.PersistentVolumeConfig{
+					NamePrefix: "gce-",
+					PVSource: v1.PersistentVolumeSource{
+						GCEPersistentDisk: &v1.GCEPersistentDiskVolumeSource{
+							PDName:   diskName,
+							FSType:   "ext3",
+							ReadOnly: false,
+						},
+					},
+					Prebind: nil,
 				}
+			}
+			clientPod, pv, pvc = initializeGCETestSpec(c, ns, pvConfig, false)
+			node = types.NodeName(clientPod.Spec.NodeName)
+		})
+
+		AfterEach(func() {
+			framework.Logf("AfterEach: Cleaning up test resources")
+			if c != nil {
+				framework.DeletePodWithWait(f, c, clientPod)
+				framework.PVPVCCleanup(c, ns, pv, pvc)
+				clientPod = nil
+				pvc = nil
 				pv = nil
 			}
-		}
-	})
+			node, clientPod, pvc, pv = "", nil, nil, nil
+		})
 
-	// Execute after *all* the tests have run
-	AddCleanupAction(func() {
-		if nfsServerPod != nil && c != nil {
-			framework.Logf("AfterSuite: nfs-server pod %v is non-nil, deleting pod", nfsServerPod.Name)
-			nfsServerPodCleanup(c, NFSconfig)
-			nfsServerPod = nil
-		}
-	})
+		AddCleanupAction(func() {
+			if len(diskName) > 0 {
+				framework.DeletePDWithRetry(diskName)
+			}
+		})
 
-	// Individual tests follow:
-	//
-	// Create an nfs PV, then a claim that matches the PV, and a pod that
-	// contains the claim. Verify that the PV and PVC bind correctly, and
-	// that the pod can write to the nfs volume.
-	It("should create a non-pre-bound PV and PVC: test write access [Flaky]", func() {
+		// Attach a persistent disk to a pod using a PVC.
+		// Delete the PVC and then the pod.  Expect the pod to succeed in unmounting and detaching PD on delete.
+		It("should test that deleting a PVC before the pod does not cause pod deletion to fail on PD detach", func() {
 
-		pv, pvc, err = createPVPVC(c, serverIP, ns, false)
-		if err != nil {
-			framework.Failf("%v", err)
-		}
+			By("Deleting the Claim")
+			framework.DeletePersistentVolumeClaim(c, pvc.Name, ns)
+			framework.VerifyGCEDiskAttached(diskName, node)
 
-		// validate PV-PVC, create and verify writer pod, delete PVC
-		// and PV
-		pv, pvc, err = completeTest(f, c, ns, pv, pvc)
-		if err != nil {
-			framework.Failf("%v", err)
-		}
-	})
+			By("Deleting the Pod")
+			framework.DeletePodWithWait(f, c, clientPod)
 
-	// Create a claim first, then a nfs PV that matches the claim, and a
-	// pod that contains the claim. Verify that the PV and PVC bind
-	// correctly, and that the pod can write to the nfs volume.
-	It("create a PVC and non-pre-bound PV: test write access [Flaky]", func() {
+			By("Verifying Persistent Disk detach")
+			err = waitForPDDetach(diskName, node)
+			Expect(err).NotTo(HaveOccurred())
+		})
 
-		pv, pvc, err = createPVCPV(c, serverIP, ns, false)
-		if err != nil {
-			framework.Failf("%v", err)
-		}
+		// Attach a persistent disk to a pod using a PVC.
+		// Delete the PV and then the pod.  Expect the pod to succeed in unmounting and detaching PD on delete.
+		It("should test that deleting the PV before the pod does not cause pod deletion to fail on PD detach", func() {
 
-		// validate PV-PVC, create and verify writer pod, delete PVC
-		// and PV
-		pv, pvc, err = completeTest(f, c, ns, pv, pvc)
-		if err != nil {
-			framework.Failf("%v", err)
-		}
-	})
+			By("Deleting the Persistent Volume")
+			framework.DeletePersistentVolume(c, pv.Name)
+			framework.VerifyGCEDiskAttached(diskName, node)
 
-	// Create a claim first, then a pre-bound nfs PV that matches the claim,
-	// and a pod that contains the claim. Verify that the PV and PVC bind
-	// correctly, and that the pod can write to the nfs volume.
-	It("create a PVC and a pre-bound PV: test write access [Flaky]", func() {
+			By("Deleting the client pod")
+			framework.DeletePodWithWait(f, c, clientPod)
 
-		pv, pvc, err = createPVCPV(c, serverIP, ns, true)
-		if err != nil {
-			framework.Failf("%v", err)
-		}
+			By("Verifying Persistent Disk detaches")
+			err = waitForPDDetach(diskName, node)
+			Expect(err).NotTo(HaveOccurred())
+		})
 
-		// validate PV-PVC, create and verify writer pod, delete PVC
-		// and PV
-		pv, pvc, err = completeTest(f, c, ns, pv, pvc)
-		if err != nil {
-			framework.Failf("%v", err)
-		}
-	})
+		// Test that a Pod and PVC attached to a GCEPD successfully unmounts and detaches when the encompassing Namespace is deleted.
+		It("should test that deleting the Namespace of a PVC and Pod causes the successful detach of Persistent Disk", func() {
 
-	// Create a nfs PV first, then a pre-bound PVC that matches the PV,
-	// and a pod that contains the claim. Verify that the PV and PVC bind
-	// correctly, and that the pod can write to the nfs volume.
-	It("create a PV and a pre-bound PVC: test write access [Flaky]", func() {
+			By("Deleting the Namespace")
+			err := c.Core().Namespaces().Delete(ns, nil)
+			Expect(err).NotTo(HaveOccurred())
 
-		pv, pvc, err = createPVPVC(c, serverIP, ns, true)
-		if err != nil {
-			framework.Failf("%v", err)
-		}
+			err = framework.WaitForNamespacesDeleted(c, []string{ns}, 3*time.Minute)
+			Expect(err).NotTo(HaveOccurred())
 
-		// validate PV-PVC, create and verify writer pod, delete PVC
-		// and PV
-		pv, pvc, err = completeTest(f, c, ns, pv, pvc)
-		if err != nil {
-			framework.Failf("%v", err)
-		}
+			By("Verifying Persistent Disk detaches")
+			err = waitForPDDetach(diskName, node)
+			Expect(err).NotTo(HaveOccurred())
+		})
 	})
 })
-
-// Returns a PV definition based on the nfs server IP. If the PVC is not nil
-// then the PV is defined with a ClaimRef which includes the PVC's namespace.
-// If the PVC is nil then the PV is not defined with a ClaimRef.
-// Note: the passed-in claim does not have a name until it is created
-//   (instantiated) and thus the PV's ClaimRef cannot be completely filled-in in
-//   this func. Therefore, the ClaimRef's name is added later in
-//   createPVCPV.
-func makePersistentVolume(serverIP string, pvc *api.PersistentVolumeClaim) *api.PersistentVolume {
-	// Specs are expected to match this test's PersistentVolumeClaim
-
-	var claimRef *api.ObjectReference
-
-	if pvc != nil {
-		claimRef = &api.ObjectReference{
-			Name:      pvc.Name,
-			Namespace: pvc.Namespace,
-		}
-	}
-
-	return &api.PersistentVolume{
-		ObjectMeta: api.ObjectMeta{
-			GenerateName: "nfs-",
-			Annotations: map[string]string{
-				volumehelper.VolumeGidAnnotationKey: "777",
-			},
-		},
-		Spec: api.PersistentVolumeSpec{
-			PersistentVolumeReclaimPolicy: api.PersistentVolumeReclaimRecycle,
-			Capacity: api.ResourceList{
-				api.ResourceName(api.ResourceStorage): resource.MustParse("2Gi"),
-			},
-			PersistentVolumeSource: api.PersistentVolumeSource{
-				NFS: &api.NFSVolumeSource{
-					Server:   serverIP,
-					Path:     "/exports",
-					ReadOnly: false,
-				},
-			},
-			AccessModes: []api.PersistentVolumeAccessMode{
-				api.ReadWriteOnce,
-				api.ReadOnlyMany,
-				api.ReadWriteMany,
-			},
-			ClaimRef: claimRef,
-		},
-	}
-}
-
-// Returns a PVC definition based on the namespace.
-// Note: if this PVC is intended to be pre-bound to a PV, whose name is not
-//   known until the PV is instantiated, then the func createPVPVC will add
-//   pvc.Spec.VolumeName to this claim.
-func makePersistentVolumeClaim(ns string) *api.PersistentVolumeClaim {
-	// Specs are expected to match this test's PersistentVolume
-
-	return &api.PersistentVolumeClaim{
-		ObjectMeta: api.ObjectMeta{
-			GenerateName: "pvc-",
-			Namespace:    ns,
-		},
-		Spec: api.PersistentVolumeClaimSpec{
-			AccessModes: []api.PersistentVolumeAccessMode{
-				api.ReadWriteOnce,
-				api.ReadOnlyMany,
-				api.ReadWriteMany,
-			},
-			Resources: api.ResourceRequirements{
-				Requests: api.ResourceList{
-					api.ResourceName(api.ResourceStorage): resource.MustParse("1Gi"),
-				},
-			},
-		},
-	}
-}
-
-// Returns a pod definition based on the namespace. The pod references the PVC's
-// name.
-func makeWritePod(ns string, pvcName string) *api.Pod {
-	// Prepare pod that mounts the NFS volume again and
-	// checks that /mnt/index.html was scrubbed there
-
-	var isPrivileged bool = true
-	return &api.Pod{
-		TypeMeta: unversioned.TypeMeta{
-			Kind:       "Pod",
-			APIVersion: testapi.Default.GroupVersion().String(),
-		},
-		ObjectMeta: api.ObjectMeta{
-			GenerateName: "write-pod-",
-			Namespace:    ns,
-		},
-		Spec: api.PodSpec{
-			Containers: []api.Container{
-				{
-					Name:    "write-pod",
-					Image:   "gcr.io/google_containers/busybox:1.24",
-					Command: []string{"/bin/sh"},
-					Args:    []string{"-c", "touch /mnt/SUCCESS && (id -G | grep -E '\\b777\\b')"},
-					VolumeMounts: []api.VolumeMount{
-						{
-							Name:      "nfs-pvc",
-							MountPath: "/mnt",
-						},
-					},
-					SecurityContext: &api.SecurityContext{
-						Privileged: &isPrivileged,
-					},
-				},
-			},
-			Volumes: []api.Volume{
-				{
-					Name: "nfs-pvc",
-					VolumeSource: api.VolumeSource{
-						PersistentVolumeClaim: &api.PersistentVolumeClaimVolumeSource{
-							ClaimName: pvcName,
-						},
-					},
-				},
-			},
-		},
-	}
-}

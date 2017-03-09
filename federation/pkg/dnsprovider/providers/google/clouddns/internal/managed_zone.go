@@ -21,13 +21,17 @@ import (
 	"k8s.io/kubernetes/federation/pkg/dnsprovider/providers/google/clouddns/internal/interfaces"
 )
 
-// Compile time check for interface adeherence
+// Compile time check for interface adherence
 var _ interfaces.ManagedZone = ManagedZone{}
 
 type ManagedZone struct{ impl *dns.ManagedZone }
 
 func (m ManagedZone) Name() string {
 	return m.impl.Name
+}
+
+func (m ManagedZone) Id() uint64 {
+	return m.impl.Id
 }
 
 func (m ManagedZone) DnsName() string {

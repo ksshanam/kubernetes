@@ -23,15 +23,16 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/apimachinery/pkg/util/wait"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	federation_v1beta1 "k8s.io/kubernetes/federation/apis/federation/v1beta1"
-	federation_release_1_4 "k8s.io/kubernetes/federation/client/clientset_generated/federation_release_1_4"
+	fedclientset "k8s.io/kubernetes/federation/client/clientset_generated/federation_clientset"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/restclient"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
-	clientcmdapi "k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
-	utilnet "k8s.io/kubernetes/pkg/util/net"
-	"k8s.io/kubernetes/pkg/util/wait"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 )
 
 const (
@@ -62,7 +63,7 @@ func BuildClusterConfig(c *federation_v1beta1.Cluster) (*restclient.Config, erro
 	}
 	if serverAddress != "" {
 		if c.Spec.SecretRef == nil {
-			glog.Infof("didnt find secretRef for cluster %s. Trying insecure access", c.Name)
+			glog.Infof("didn't find secretRef for cluster %s. Trying insecure access", c.Name)
 			clusterConfig, err = clientcmd.BuildConfigFromFlags(serverAddress, "")
 		} else {
 			kubeconfigGetter := KubeconfigGetterForCluster(c)
@@ -78,20 +79,20 @@ func BuildClusterConfig(c *federation_v1beta1.Cluster) (*restclient.Config, erro
 }
 
 // This is to inject a different kubeconfigGetter in tests.
-// We dont use the standard one which calls NewInCluster in tests to avoid having to setup service accounts and mount files with secret tokens.
+// We don't use the standard one which calls NewInCluster in tests to avoid having to setup service accounts and mount files with secret tokens.
 var KubeconfigGetterForCluster = func(c *federation_v1beta1.Cluster) clientcmd.KubeconfigGetter {
 	return func() (*clientcmdapi.Config, error) {
 		secretRefName := ""
 		if c.Spec.SecretRef != nil {
 			secretRefName = c.Spec.SecretRef.Name
 		} else {
-			glog.Infof("didnt find secretRef for cluster %s. Trying insecure access", c.Name)
+			glog.Infof("didn't find secretRef for cluster %s. Trying insecure access", c.Name)
 		}
 		return KubeconfigGetterForSecret(secretRefName)()
 	}
 }
 
-// KubeconfigGettterForSecret is used to get the kubeconfig from the given secret.
+// KubeconfigGetterForSecret is used to get the kubeconfig from the given secret.
 var KubeconfigGetterForSecret = func(secretName string) clientcmd.KubeconfigGetter {
 	return func() (*clientcmdapi.Config, error) {
 		var data []byte
@@ -102,14 +103,18 @@ var KubeconfigGetterForSecret = func(secretName string) clientcmd.KubeconfigGett
 				return nil, fmt.Errorf("unexpected: POD_NAMESPACE env var returned empty string")
 			}
 			// Get a client to talk to the k8s apiserver, to fetch secrets from it.
-			client, err := client.NewInCluster()
+			cc, err := restclient.InClusterConfig()
+			if err != nil {
+				return nil, fmt.Errorf("error in creating in-cluster client: %s", err)
+			}
+			client, err := clientset.NewForConfig(cc)
 			if err != nil {
 				return nil, fmt.Errorf("error in creating in-cluster client: %s", err)
 			}
 			data = []byte{}
 			var secret *api.Secret
 			err = wait.PollImmediate(1*time.Second, getSecretTimeout, func() (bool, error) {
-				secret, err = client.Secrets(namespace).Get(secretName)
+				secret, err = client.Core().Secrets(namespace).Get(secretName, metav1.GetOptions{})
 				if err == nil {
 					return true, nil
 				}
@@ -132,11 +137,11 @@ var KubeconfigGetterForSecret = func(secretName string) clientcmd.KubeconfigGett
 	}
 }
 
-// Retruns Clientset for the given cluster.
-func GetClientsetForCluster(cluster *federation_v1beta1.Cluster) (*federation_release_1_4.Clientset, error) {
+// Returns Clientset for the given cluster.
+func GetClientsetForCluster(cluster *federation_v1beta1.Cluster) (*fedclientset.Clientset, error) {
 	clusterConfig, err := BuildClusterConfig(cluster)
 	if err != nil && clusterConfig != nil {
-		clientset := federation_release_1_4.NewForConfigOrDie(restclient.AddUserAgent(clusterConfig, userAgentName))
+		clientset := fedclientset.NewForConfigOrDie(restclient.AddUserAgent(clusterConfig, userAgentName))
 		return clientset, nil
 	}
 	return nil, err

@@ -23,30 +23,33 @@ import (
 	"io/ioutil"
 	"path/filepath"
 
-	"github.com/renstrom/dedent"
 	"github.com/spf13/cobra"
 
-	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
-	clientcmdapi "k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
-	"k8s.io/kubernetes/pkg/util"
-	"k8s.io/kubernetes/pkg/util/flag"
+	"k8s.io/apiserver/pkg/util/flag"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
+	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/util/i18n"
 )
 
 type createClusterOptions struct {
 	configAccess          clientcmd.ConfigAccess
 	name                  string
-	server                util.StringFlag
-	apiVersion            util.StringFlag
+	server                flag.StringFlag
+	apiVersion            flag.StringFlag
 	insecureSkipTLSVerify flag.Tristate
-	certificateAuthority  util.StringFlag
+	certificateAuthority  flag.StringFlag
 	embedCAData           flag.Tristate
 }
 
 var (
-	create_cluster_long = dedent.Dedent(`
+	create_cluster_long = templates.LongDesc(`
 		Sets a cluster entry in kubeconfig.
+
 		Specifying a name that already exists will merge new fields on top of existing values for those fields.`)
-	create_cluster_example = dedent.Dedent(`
+
+	create_cluster_example = templates.Examples(`
 		# Set only the server field on the e2e cluster entry without touching other values.
 		kubectl config set-cluster e2e --server=https://1.2.3.4
 
@@ -62,7 +65,7 @@ func NewCmdConfigSetCluster(out io.Writer, configAccess clientcmd.ConfigAccess) 
 
 	cmd := &cobra.Command{
 		Use:     fmt.Sprintf("set-cluster NAME [--%v=server] [--%v=path/to/certificate/authority] [--%v=true]", clientcmd.FlagAPIServer, clientcmd.FlagCAFile, clientcmd.FlagInsecure),
-		Short:   "Sets a cluster entry in kubeconfig",
+		Short:   i18n.T("Sets a cluster entry in kubeconfig"),
 		Long:    create_cluster_long,
 		Example: create_cluster_example,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -70,12 +73,8 @@ func NewCmdConfigSetCluster(out io.Writer, configAccess clientcmd.ConfigAccess) 
 				return
 			}
 
-			err := options.run()
-			if err != nil {
-				fmt.Fprintf(out, "%v\n", err)
-			} else {
-				fmt.Fprintf(out, "cluster %q set.\n", options.name)
-			}
+			cmdutil.CheckErr(options.run())
+			fmt.Fprintf(out, "Cluster %q set.\n", options.name)
 		},
 	}
 

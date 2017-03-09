@@ -24,11 +24,11 @@ import (
 
 	"github.com/golang/glog"
 
-	"k8s.io/kubernetes/pkg/client/restclient"
-	"k8s.io/kubernetes/pkg/client/transport"
+	"k8s.io/apimachinery/pkg/util/httpstream"
+	"k8s.io/apimachinery/pkg/util/httpstream/spdy"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/transport"
 	"k8s.io/kubernetes/pkg/kubelet/server/remotecommand"
-	"k8s.io/kubernetes/pkg/util/httpstream"
-	"k8s.io/kubernetes/pkg/util/httpstream/spdy"
 	"k8s.io/kubernetes/pkg/util/term"
 )
 
@@ -98,7 +98,7 @@ func NewExecutor(config *restclient.Config, method string, url *url.URL) (Stream
 // to wrap the round tripper. This method may be used by clients that are lower level than
 // Kubernetes clients or need to provide their own upgrade round tripper.
 func NewStreamExecutor(upgrader httpstream.UpgradeRoundTripper, fn func(http.RoundTripper) http.RoundTripper, method string, url *url.URL) (StreamExecutor, error) {
-	var rt http.RoundTripper = upgrader
+	rt := http.RoundTripper(upgrader)
 	if fn != nil {
 		rt = fn(rt)
 	}

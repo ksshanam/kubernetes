@@ -40,7 +40,7 @@ func newTestInterface() (dnsprovider.Interface, error) {
 func newFakeInterface() (dnsprovider.Interface, error) {
 	var service route53testing.Route53API
 	service = route53testing.NewRoute53APIStub()
-	iface := newInterfaceWithStub(service)
+	iface := New(service)
 	// Add a fake zone to test against.
 	params := &route53.CreateHostedZoneInput{
 		CallerReference: aws.String("Nonce"),       // Required
@@ -141,9 +141,20 @@ func addRrsetOrFail(t *testing.T, rrsets dnsprovider.ResourceRecordSets, rrset d
 	}
 }
 
-/* TestResourceRecordSetsList verifies that listing of zones succeeds */
+/* TestZonesList verifies that listing of zones succeeds */
 func TestZonesList(t *testing.T) {
 	firstZone(t)
+}
+
+/* TestZonesID verifies that the id of the zone is returned with the prefix removed */
+func TestZonesID(t *testing.T) {
+	zone := firstZone(t)
+
+	// Check /hostedzone/ prefix is removed
+	zoneID := zone.ID()
+	if zoneID != zone.Name() {
+		t.Fatalf("Unexpected zone id: %q", zoneID)
+	}
 }
 
 /* TestZoneAddSuccess verifies that addition of a valid managed DNS zone succeeds */

@@ -20,28 +20,29 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/renstrom/dedent"
 	"github.com/spf13/cobra"
 
 	"k8s.io/kubernetes/pkg/kubectl"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/util/i18n"
 )
 
 var (
-	deploymentLong = dedent.Dedent(`
-                Create a deployment with the specified name.`)
+	deploymentLong = templates.LongDesc(`
+    Create a deployment with the specified name.`)
 
-	deploymentExample = dedent.Dedent(`
-                # Create a new deployment named my-dep that runs the busybox image.
-                kubectl create deployment my-dep --image=busybox`)
+	deploymentExample = templates.Examples(`
+    # Create a new deployment named my-dep that runs the busybox image.
+    kubectl create deployment my-dep --image=busybox`)
 )
 
 // NewCmdCreateDeployment is a macro command to create a new deployment
-func NewCmdCreateDeployment(f *cmdutil.Factory, cmdOut io.Writer) *cobra.Command {
+func NewCmdCreateDeployment(f cmdutil.Factory, cmdOut io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "deployment NAME --image=image [--dry-run]",
-		Aliases: []string{"dep"},
-		Short:   "Create a deployment with the specified name.",
+		Aliases: []string{"deploy"},
+		Short:   i18n.T("Create a deployment with the specified name."),
 		Long:    deploymentLong,
 		Example: deploymentExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -59,7 +60,7 @@ func NewCmdCreateDeployment(f *cmdutil.Factory, cmdOut io.Writer) *cobra.Command
 }
 
 // CreateDeployment implements the behavior to run the create deployment command
-func CreateDeployment(f *cmdutil.Factory, cmdOut io.Writer, cmd *cobra.Command, args []string) error {
+func CreateDeployment(f cmdutil.Factory, cmdOut io.Writer, cmd *cobra.Command, args []string) error {
 	name, err := NameFromCommandArgs(cmd, args)
 	if err != nil {
 		return err

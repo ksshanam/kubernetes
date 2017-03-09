@@ -1,7 +1,17 @@
-assignees:
+reviewers:
   - eparis
-  - ihmccreery
+  - fejta
   - ixdy
+  - jbeda
+  - lavalamp
+  - spxtr
+  - zmerlynn
+approvers:
+  - deads2k
+  - eparis
+  - fejta
+  - ixdy
+  - jbeda
   - lavalamp
   - spxtr
   - zmerlynn

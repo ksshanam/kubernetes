@@ -28,15 +28,15 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update -y \
     util-linux \
     socat \
     git \
+    jq \
     nfs-common \
+    glusterfs-client \
+    cifs-utils \
     && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     && DEBIAN_FRONTEND=noninteractive apt-get autoremove -y \
-    && DEBIAN_FRONTEND=noninteractive apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    && DEBIAN_FRONTEND=noninteractive apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* # CACHEBUST
 
 RUN cp /usr/bin/nsenter /nsenter
-
-# Copy the hyperkube binary
-COPY hyperkube /hyperkube
 
 # Manifests for the docker guide
 COPY static-pods/master.json \
@@ -66,6 +66,8 @@ COPY cni-bin/bin /opt/cni/bin
 COPY cni-conf /etc/cni/net.d
 
 # Create symlinks for each hyperkube server
+# Also create symlinks to /usr/local/bin/ where the server image binaries live, so the hyperkube image may be 
+# used instead of gcr.io/google_containers/kube-* without any modifications.
 # TODO: replace manual symlink creation with --make-symlink command once
 # cross-building with qemu supports go binaries. See #28702
 # RUN /hyperkube --make-symlinks
@@ -76,4 +78,15 @@ RUN ln -s /hyperkube /apiserver \
  && ln -s /hyperkube /kubectl \
  && ln -s /hyperkube /kubelet \
  && ln -s /hyperkube /proxy \
- && ln -s /hyperkube /scheduler
+ && ln -s /hyperkube /scheduler \
+ && ln -s /hyperkube /usr/local/bin/kube-apiserver \
+ && ln -s /hyperkube /usr/local/bin/kube-controller-manager \
+ && ln -s /hyperkube /usr/local/bin/federation-apiserver \
+ && ln -s /hyperkube /usr/local/bin/federation-controller-manager \
+ && ln -s /hyperkube /usr/local/bin/kubectl \
+ && ln -s /hyperkube /usr/local/bin/kubelet \
+ && ln -s /hyperkube /usr/local/bin/kube-proxy \
+ && ln -s /hyperkube /usr/local/bin/kube-scheduler
+
+# Copy the hyperkube binary
+COPY hyperkube /hyperkube

@@ -17,12 +17,12 @@ limitations under the License.
 package service
 
 import (
-	"fmt"
 	"time"
 
-	federation_release_1_4 "k8s.io/kubernetes/federation/client/clientset_generated/federation_release_1_4"
+	"k8s.io/apimachinery/pkg/api/errors"
+	cache "k8s.io/client-go/tools/cache"
+	fedclientset "k8s.io/kubernetes/federation/client/clientset_generated/federation_clientset"
 	v1 "k8s.io/kubernetes/pkg/api/v1"
-	cache "k8s.io/kubernetes/pkg/client/cache"
 	"k8s.io/kubernetes/pkg/controller"
 
 	"github.com/golang/glog"
@@ -31,14 +31,34 @@ import (
 // worker runs a worker thread that just dequeues items, processes them, and marks them done.
 // It enforces that the syncHandler is never invoked concurrently with the same key.
 func (sc *ServiceController) clusterEndpointWorker() {
-	fedClient := sc.federationClient
+	// process all pending events in endpointWorkerDoneChan
+ForLoop:
+	for {
+		select {
+		case clusterName := <-sc.endpointWorkerDoneChan:
+			sc.endpointWorkerMap[clusterName] = false
+		default:
+			// non-blocking, comes here if all existing events are processed
+			break ForLoop
+		}
+	}
+
 	for clusterName, cache := range sc.clusterCache.clientMap {
+		workerExist, found := sc.endpointWorkerMap[clusterName]
+		if found && workerExist {
+			continue
+		}
+
+		// create a worker only if the previous worker has finished and gone out of scope
 		go func(cache *clusterCache, clusterName string) {
+			fedClient := sc.federationClient
 			for {
 				func() {
 					key, quit := cache.endpointQueue.Get()
 					// update endpoint cache
 					if quit {
+						// send signal that current worker has finished tasks and is going out of scope
+						sc.endpointWorkerDoneChan <- clusterName
 						return
 					}
 					defer cache.endpointQueue.Done(key)
@@ -49,40 +69,37 @@ func (sc *ServiceController) clusterEndpointWorker() {
 				}()
 			}
 		}(cache, clusterName)
+		sc.endpointWorkerMap[clusterName] = true
 	}
 }
 
 // Whenever there is change on endpoint, the federation service should be updated
 // key is the namespaced name of endpoint
-func (cc *clusterClientCache) syncEndpoint(key, clusterName string, clusterCache *clusterCache, serviceCache *serviceCache, fedClient federation_release_1_4.Interface, serviceController *ServiceController) error {
+func (cc *clusterClientCache) syncEndpoint(key, clusterName string, clusterCache *clusterCache, serviceCache *serviceCache, fedClient fedclientset.Interface, serviceController *ServiceController) error {
 	cachedService, ok := serviceCache.get(key)
 	if !ok {
 		// here we filtered all non-federation services
 		return nil
 	}
-	endpointInterface, exists, err := clusterCache.endpointStore.GetByKey(key)
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
-		glog.Infof("Did not successfully get %v from store: %v, will retry later", key, err)
+		glog.Errorf("Did not successfully get %v from store: %v, will retry later", key, err)
 		clusterCache.endpointQueue.Add(key)
 		return err
 	}
-	if exists {
-		endpoint, ok := endpointInterface.(*v1.Endpoints)
-		if ok {
-			glog.V(4).Infof("Found endpoint for federation service %s/%s from cluster %s", endpoint.Namespace, endpoint.Name, clusterName)
-			err = cc.processEndpointUpdate(cachedService, endpoint, clusterName, serviceController)
-		} else {
-			_, ok := endpointInterface.(cache.DeletedFinalStateUnknown)
-			if !ok {
-				return fmt.Errorf("Object contained wasn't a service or a deleted key: %+v", endpointInterface)
-			}
-			glog.Infof("Found tombstone for %v", key)
-			err = cc.processEndpointDeletion(cachedService, clusterName, serviceController)
-		}
-	} else {
+	endpoint, err := clusterCache.endpointStore.Endpoints(namespace).Get(name)
+	switch {
+	case errors.IsNotFound(err):
 		// service absence in store means watcher caught the deletion, ensure LB info is cleaned
 		glog.Infof("Can not get endpoint %v for cluster %s from endpointStore", key, clusterName)
 		err = cc.processEndpointDeletion(cachedService, clusterName, serviceController)
+	case err != nil:
+		glog.Errorf("Did not successfully get %v from store: %v, will retry later", key, err)
+		clusterCache.endpointQueue.Add(key)
+		return err
+	default:
+		glog.V(4).Infof("Found endpoint for federation service %s/%s from cluster %s", endpoint.Namespace, endpoint.Name, clusterName)
+		err = cc.processEndpointUpdate(cachedService, endpoint, clusterName, serviceController)
 	}
 	if err != nil {
 		glog.Errorf("Failed to sync service: %+v, put back to service queue", err)

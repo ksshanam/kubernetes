@@ -21,18 +21,17 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-	federation_v1beta1 "k8s.io/kubernetes/federation/apis/federation/v1beta1"
-	cluster_cache "k8s.io/kubernetes/federation/client/cache"
-	federationclientset "k8s.io/kubernetes/federation/client/clientset_generated/federation_release_1_4"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/cache"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/tools/cache"
+	federationv1beta1 "k8s.io/kubernetes/federation/apis/federation/v1beta1"
+	clustercache "k8s.io/kubernetes/federation/client/cache"
+	federationclientset "k8s.io/kubernetes/federation/client/clientset_generated/federation_clientset"
 	"k8s.io/kubernetes/pkg/controller"
-	"k8s.io/kubernetes/pkg/controller/framework"
-	"k8s.io/kubernetes/pkg/runtime"
-	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
-	"k8s.io/kubernetes/pkg/util/sets"
-	"k8s.io/kubernetes/pkg/util/wait"
-	"k8s.io/kubernetes/pkg/watch"
 )
 
 type ClusterController struct {
@@ -44,14 +43,14 @@ type ClusterController struct {
 	// clusterMonitorPeriod is the period for updating status of cluster
 	clusterMonitorPeriod time.Duration
 	// clusterClusterStatusMap is a mapping of clusterName and cluster status of last sampling
-	clusterClusterStatusMap map[string]federation_v1beta1.ClusterStatus
+	clusterClusterStatusMap map[string]federationv1beta1.ClusterStatus
 
 	// clusterKubeClientMap is a mapping of clusterName and restclient
 	clusterKubeClientMap map[string]ClusterClient
 
 	// cluster framework and store
-	clusterController *framework.Controller
-	clusterStore      cluster_cache.StoreToClusterLister
+	clusterController cache.Controller
+	clusterStore      clustercache.StoreToClusterLister
 }
 
 // NewclusterController returns a new cluster controller
@@ -60,21 +59,21 @@ func NewclusterController(federationClient federationclientset.Interface, cluste
 		knownClusterSet:         make(sets.String),
 		federationClient:        federationClient,
 		clusterMonitorPeriod:    clusterMonitorPeriod,
-		clusterClusterStatusMap: make(map[string]federation_v1beta1.ClusterStatus),
+		clusterClusterStatusMap: make(map[string]federationv1beta1.ClusterStatus),
 		clusterKubeClientMap:    make(map[string]ClusterClient),
 	}
-	cc.clusterStore.Store, cc.clusterController = framework.NewInformer(
+	cc.clusterStore.Store, cc.clusterController = cache.NewInformer(
 		&cache.ListWatch{
-			ListFunc: func(options api.ListOptions) (runtime.Object, error) {
+			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 				return cc.federationClient.Federation().Clusters().List(options)
 			},
-			WatchFunc: func(options api.ListOptions) (watch.Interface, error) {
+			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				return cc.federationClient.Federation().Clusters().Watch(options)
 			},
 		},
-		&federation_v1beta1.Cluster{},
+		&federationv1beta1.Cluster{},
 		controller.NoResyncPeriodFunc(),
-		framework.ResourceEventHandlerFuncs{
+		cache.ResourceEventHandlerFuncs{
 			DeleteFunc: cc.delFromClusterSet,
 			AddFunc:    cc.addToClusterSet,
 		},
@@ -85,7 +84,7 @@ func NewclusterController(federationClient federationclientset.Interface, cluste
 // delFromClusterSet delete a cluster from clusterSet and
 // delete the corresponding restclient from the map clusterKubeClientMap
 func (cc *ClusterController) delFromClusterSet(obj interface{}) {
-	cluster := obj.(*federation_v1beta1.Cluster)
+	cluster := obj.(*federationv1beta1.Cluster)
 	cc.knownClusterSet.Delete(cluster.Name)
 	delete(cc.clusterKubeClientMap, cluster.Name)
 }
@@ -93,7 +92,7 @@ func (cc *ClusterController) delFromClusterSet(obj interface{}) {
 // addToClusterSet insert the new cluster to clusterSet and create a corresponding
 // restclient to map clusterKubeClientMap
 func (cc *ClusterController) addToClusterSet(obj interface{}) {
-	cluster := obj.(*federation_v1beta1.Cluster)
+	cluster := obj.(*federationv1beta1.Cluster)
 	cc.knownClusterSet.Insert(cluster.Name)
 	// create the restclient of cluster
 	restClient, err := NewClusterClientSet(cluster)
@@ -116,14 +115,14 @@ func (cc *ClusterController) Run() {
 	}, cc.clusterMonitorPeriod, wait.NeverStop)
 }
 
-func (cc *ClusterController) GetClusterStatus(cluster *federation_v1beta1.Cluster) (*federation_v1beta1.ClusterStatus, error) {
+func (cc *ClusterController) GetClusterStatus(cluster *federationv1beta1.Cluster) (*federationv1beta1.ClusterStatus, error) {
 	// just get the status of cluster, by requesting the restapi "/healthz"
 	clusterClient, found := cc.clusterKubeClientMap[cluster.Name]
 	if !found {
 		glog.Infof("It's a new cluster, a cluster client will be created")
 		client, err := NewClusterClientSet(cluster)
 		if err != nil || client == nil {
-			glog.Infof("Failed to create cluster client, err: %v", err)
+			glog.Errorf("Failed to create cluster client, err: %v", err)
 			return nil, err
 		}
 		clusterClient = *client
@@ -135,7 +134,7 @@ func (cc *ClusterController) GetClusterStatus(cluster *federation_v1beta1.Cluste
 
 // UpdateClusterStatus checks cluster status and get the metrics from cluster's restapi
 func (cc *ClusterController) UpdateClusterStatus() error {
-	clusters, err := cc.federationClient.Federation().Clusters().List(api.ListOptions{})
+	clusters, err := cc.federationClient.Federation().Clusters().List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}

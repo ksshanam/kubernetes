@@ -14,8 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// CAUTION: If you update code in this file, you may need to also update code
-//          in contrib/mesos/cmd/km/k8sm-scheduler.go
 package main
 
 import (
@@ -29,8 +27,10 @@ func NewScheduler() *Server {
 	s := options.NewSchedulerServer()
 
 	hks := Server{
-		SimpleUsage: "scheduler",
-		Long:        "Implements a Kubernetes scheduler.  This will assign pods to kubelets based on capacity and constraints.",
+		name:            "scheduler",
+		AlternativeName: "kube-scheduler",
+		SimpleUsage:     "scheduler",
+		Long:            "Implements a Kubernetes scheduler.  This will assign pods to kubelets based on capacity and constraints.",
 		Run: func(_ *Server, _ []string) error {
 			return app.Run(s)
 		},
