@@ -105,7 +105,12 @@ func (ds *dockerService) RunPodSandbox(config *runtimeapi.PodSandboxConfig) (str
 	// recognized by the CNI standard yet.
 	cID := kubecontainer.BuildContainerID(runtimeName, createResp.ID)
 	err = ds.network.SetUpPod(config.GetMetadata().Namespace, config.GetMetadata().Name, cID, config.Annotations)
-	// TODO: Do we need to teardown on failure or can we rely on a StopPodSandbox call with the given ID?
+	if err != nil {
+		// TODO(random-liu): Do we need to teardown network here?
+		if err := ds.client.StopContainer(createResp.ID, defaultSandboxGracePeriod); err != nil {
+			glog.Warningf("Failed to stop sandbox container %q for pod %q: %v", createResp.ID, config.Metadata.Name, err)
+		}
+	}
 	return createResp.ID, err
 }
 
@@ -139,6 +144,16 @@ func (ds *dockerService) StopPodSandbox(podSandboxID string) error {
 				glog.Warningf("Both sandbox container and checkpoint for id %q could not be found. "+
 					"Proceed without further sandbox information.", podSandboxID)
 			} else {
+				if checkpointErr == errors.CorruptCheckpointError {
+					// Remove the corrupted checkpoint so that the next
+					// StopPodSandbox call can proceed. This may indicate that
+					// some resources won't be reclaimed.
+					// TODO (#43021): Fix this properly.
+					glog.Warningf("Removing corrupted checkpoint %q: %+v", podSandboxID, *checkpoint)
+					if err := ds.checkpointHandler.RemoveCheckpoint(podSandboxID); err != nil {
+						glog.Warningf("Unable to remove corrupted checkpoint %q: %v", podSandboxID, err)
+					}
+				}
 				return utilerrors.NewAggregate([]error{
 					fmt.Errorf("failed to get checkpoint for sandbox %q: %v", podSandboxID, checkpointErr),
 					fmt.Errorf("failed to get sandbox status: %v", statusErr)})
@@ -341,6 +356,18 @@ func (ds *dockerService) ListPodSandbox(filter *runtimeapi.PodSandboxFilter) ([]
 			}
 		}
 	}
+
+	// Make sure we get the list of checkpoints first so that we don't include
+	// new PodSandboxes that are being created right now.
+	var err error
+	checkpoints := []string{}
+	if filter == nil {
+		checkpoints, err = ds.checkpointHandler.ListCheckpoints()
+		if err != nil {
+			glog.Errorf("Failed to list checkpoints: %v", err)
+		}
+	}
+
 	containers, err := ds.client.ListContainers(opts)
 	if err != nil {
 		return nil, err
@@ -367,27 +394,23 @@ func (ds *dockerService) ListPodSandbox(filter *runtimeapi.PodSandboxFilter) ([]
 	// Include sandbox that could only be found with its checkpoint if no filter is applied
 	// These PodSandbox will only include PodSandboxID, Name, Namespace.
 	// These PodSandbox will be in PodSandboxState_SANDBOX_NOTREADY state.
-	if filter == nil {
-		checkpoints, err := ds.checkpointHandler.ListCheckpoints()
+	for _, id := range checkpoints {
+		if _, ok := sandboxIDs[id]; ok {
+			continue
+		}
+		checkpoint, err := ds.checkpointHandler.GetCheckpoint(id)
 		if err != nil {
-			glog.Errorf("Failed to list checkpoints: %v", err)
-		}
-		for _, id := range checkpoints {
-			if _, ok := sandboxIDs[id]; ok {
-				continue
-			}
-			checkpoint, err := ds.checkpointHandler.GetCheckpoint(id)
-			if err != nil {
-				glog.Errorf("Failed to retrieve checkpoint for sandbox %q: %v", id, err)
+			glog.Errorf("Failed to retrieve checkpoint for sandbox %q: %v", id, err)
 
-				if err == errors.CorruptCheckpointError {
-					glog.V(2).Info("Removing corrupted checkpoint %q: %+v", id, *checkpoint)
-					ds.checkpointHandler.RemoveCheckpoint(id)
+			if err == errors.CorruptCheckpointError {
+				glog.Warningf("Removing corrupted checkpoint %q: %+v", id, *checkpoint)
+				if err := ds.checkpointHandler.RemoveCheckpoint(id); err != nil {
+					glog.Warningf("Unable to remove corrupted checkpoint %q: %v", id, err)
 				}
-				continue
 			}
-			result = append(result, checkpointToRuntimeAPISandbox(id, checkpoint))
+			continue
 		}
+		result = append(result, checkpointToRuntimeAPISandbox(id, checkpoint))
 	}
 
 	// Include legacy sandboxes if there are still legacy sandboxes not cleaned up yet.
