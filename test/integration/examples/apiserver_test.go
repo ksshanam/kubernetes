@@ -112,13 +112,18 @@ func TestAggregatedAPIServer(t *testing.T) {
 			kubeAPIServerOptions.Authentication.ClientCert.ClientCA = clientCACertFile.Name()
 			kubeAPIServerOptions.Authorization.Mode = "RBAC"
 
-			config, sharedInformers, err := app.BuildMasterConfig(kubeAPIServerOptions)
+			kubeAPIServerConfig, sharedInformers, err := app.CreateKubeAPIServerConfig(kubeAPIServerOptions)
 			if err != nil {
 				t.Fatal(err)
 			}
-			kubeClientConfigValue.Store(config.GenericConfig.LoopbackClientConfig)
+			kubeClientConfigValue.Store(kubeAPIServerConfig.GenericConfig.LoopbackClientConfig)
 
-			if err := app.RunServer(config, sharedInformers, stopCh); err != nil {
+			kubeAPIServer, err := app.CreateKubeAPIServer(kubeAPIServerConfig, sharedInformers, wait.NeverStop)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := kubeAPIServer.GenericAPIServer.PrepareRun().Run(wait.NeverStop); err != nil {
 				t.Log(err)
 			}
 			time.Sleep(100 * time.Millisecond)
@@ -302,7 +307,7 @@ func TestAggregatedAPIServer(t *testing.T) {
 	_, err = aggregatorClient.ApiregistrationV1alpha1().APIServices().Create(&apiregistrationv1alpha1.APIService{
 		ObjectMeta: metav1.ObjectMeta{Name: "v1alpha1.wardle.k8s.io"},
 		Spec: apiregistrationv1alpha1.APIServiceSpec{
-			Service: apiregistrationv1alpha1.ServiceReference{
+			Service: &apiregistrationv1alpha1.ServiceReference{
 				Namespace: "kube-wardle",
 				Name:      "api",
 			},
@@ -326,7 +331,7 @@ func TestAggregatedAPIServer(t *testing.T) {
 	_, err = aggregatorClient.ApiregistrationV1alpha1().APIServices().Create(&apiregistrationv1alpha1.APIService{
 		ObjectMeta: metav1.ObjectMeta{Name: "v1."},
 		Spec: apiregistrationv1alpha1.APIServiceSpec{
-			Service: apiregistrationv1alpha1.ServiceReference{
+			Service: &apiregistrationv1alpha1.ServiceReference{
 				Namespace: "default",
 				Name:      "kubernetes",
 			},
