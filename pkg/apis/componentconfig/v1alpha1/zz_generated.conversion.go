@@ -137,6 +137,11 @@ func autoConvert_v1alpha1_KubeSchedulerConfiguration_To_componentconfig_KubeSche
 	if err := Convert_v1alpha1_LeaderElectionConfiguration_To_componentconfig_LeaderElectionConfiguration(&in.LeaderElection, &out.LeaderElection, s); err != nil {
 		return err
 	}
+	out.LockObjectNamespace = in.LockObjectNamespace
+	out.LockObjectName = in.LockObjectName
+	out.PolicyConfigMapName = in.PolicyConfigMapName
+	out.PolicyConfigMapNamespace = in.PolicyConfigMapNamespace
+	out.UseLegacyPolicyConfig = in.UseLegacyPolicyConfig
 	return nil
 }
 
@@ -162,6 +167,11 @@ func autoConvert_componentconfig_KubeSchedulerConfiguration_To_v1alpha1_KubeSche
 	if err := Convert_componentconfig_LeaderElectionConfiguration_To_v1alpha1_LeaderElectionConfiguration(&in.LeaderElection, &out.LeaderElection, s); err != nil {
 		return err
 	}
+	out.LockObjectNamespace = in.LockObjectNamespace
+	out.LockObjectName = in.LockObjectName
+	out.PolicyConfigMapName = in.PolicyConfigMapName
+	out.PolicyConfigMapNamespace = in.PolicyConfigMapNamespace
+	out.UseLegacyPolicyConfig = in.UseLegacyPolicyConfig
 	return nil
 }
 
@@ -271,7 +281,6 @@ func autoConvert_v1alpha1_KubeletConfiguration_To_componentconfig_KubeletConfigu
 	if err := Convert_v1alpha1_KubeletAuthorization_To_componentconfig_KubeletAuthorization(&in.Authorization, &out.Authorization, s); err != nil {
 		return err
 	}
-	out.HostnameOverride = in.HostnameOverride
 	out.PodInfraContainerImage = in.PodInfraContainerImage
 	out.DockerEndpoint = in.DockerEndpoint
 	out.RootDirectory = in.RootDirectory
@@ -377,7 +386,6 @@ func autoConvert_v1alpha1_KubeletConfiguration_To_componentconfig_KubeletConfigu
 		return err
 	}
 	out.OutOfDiskTransitionFrequency = in.OutOfDiskTransitionFrequency
-	out.NodeIP = in.NodeIP
 	out.NodeLabels = *(*map[string]string)(unsafe.Pointer(&in.NodeLabels))
 	out.NonMasqueradeCIDR = in.NonMasqueradeCIDR
 	out.EnableCustomMetrics = in.EnableCustomMetrics
@@ -410,6 +418,9 @@ func autoConvert_v1alpha1_KubeletConfiguration_To_componentconfig_KubeletConfigu
 	out.AllowedUnsafeSysctls = *(*[]string)(unsafe.Pointer(&in.AllowedUnsafeSysctls))
 	out.FeatureGates = in.FeatureGates
 	if err := v1.Convert_Pointer_bool_To_bool(&in.EnableCRI, &out.EnableCRI, s); err != nil {
+		return err
+	}
+	if err := v1.Convert_Pointer_bool_To_bool(&in.ExperimentalDockershim, &out.ExperimentalDockershim, s); err != nil {
 		return err
 	}
 	out.ExperimentalFailSwapOn = in.ExperimentalFailSwapOn
@@ -450,7 +461,6 @@ func autoConvert_componentconfig_KubeletConfiguration_To_v1alpha1_KubeletConfigu
 	if err := Convert_componentconfig_KubeletAuthorization_To_v1alpha1_KubeletAuthorization(&in.Authorization, &out.Authorization, s); err != nil {
 		return err
 	}
-	out.HostnameOverride = in.HostnameOverride
 	out.PodInfraContainerImage = in.PodInfraContainerImage
 	out.DockerEndpoint = in.DockerEndpoint
 	out.RootDirectory = in.RootDirectory
@@ -576,7 +586,6 @@ func autoConvert_componentconfig_KubeletConfiguration_To_v1alpha1_KubeletConfigu
 		return err
 	}
 	out.OutOfDiskTransitionFrequency = in.OutOfDiskTransitionFrequency
-	out.NodeIP = in.NodeIP
 	out.NodeLabels = *(*map[string]string)(unsafe.Pointer(&in.NodeLabels))
 	out.NonMasqueradeCIDR = in.NonMasqueradeCIDR
 	out.EnableCustomMetrics = in.EnableCustomMetrics
@@ -609,6 +618,9 @@ func autoConvert_componentconfig_KubeletConfiguration_To_v1alpha1_KubeletConfigu
 	out.AllowedUnsafeSysctls = *(*[]string)(unsafe.Pointer(&in.AllowedUnsafeSysctls))
 	out.FeatureGates = in.FeatureGates
 	if err := v1.Convert_bool_To_Pointer_bool(&in.EnableCRI, &out.EnableCRI, s); err != nil {
+		return err
+	}
+	if err := v1.Convert_bool_To_Pointer_bool(&in.ExperimentalDockershim, &out.ExperimentalDockershim, s); err != nil {
 		return err
 	}
 	out.ExperimentalFailSwapOn = in.ExperimentalFailSwapOn

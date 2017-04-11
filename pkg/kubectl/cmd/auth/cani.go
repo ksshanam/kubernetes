@@ -66,6 +66,9 @@ var (
 		# Check to see if I can list deployments in my current namespace
 		kubectl auth can-i list deployments.extensions
 
+		# Check to see if I can do everything in my current namespace ("*" means all)
+		kubectl auth can-i '*' '*'
+
 		# Check to see if I can get the job named "bar" in namespace "foo"
 		kubectl auth can-i list jobs.batch/bar -n foo`)
 )
@@ -87,11 +90,9 @@ func NewCmdCanI(f cmdutil.Factory, out, err io.Writer) *cobra.Command {
 
 			allowed, err := o.RunAccessCheck()
 			if err == nil {
-				return
-			}
-
-			if o.Quiet && !allowed {
-				os.Exit(1)
+				if o.Quiet && !allowed {
+					os.Exit(1)
+				}
 			}
 
 			cmdutil.CheckErr(err)

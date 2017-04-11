@@ -24,26 +24,12 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/tools/cache"
+	ktesting "k8s.io/client-go/testing"
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/internalversion"
 )
-
-type fakeLW struct {
-	listResp  runtime.Object
-	watchResp watch.Interface
-}
-
-func (lw fakeLW) List(options metav1.ListOptions) (runtime.Object, error) {
-	return lw.listResp, nil
-}
-
-func (lw fakeLW) Watch(options metav1.ListOptions) (watch.Interface, error) {
-	return lw.watchResp, nil
-}
-
-var _ cache.ListerWatcher = fakeLW{}
 
 func TestNewServicesSourceApi_UpdatesAndMultipleServices(t *testing.T) {
 	service1v1 := &api.Service{
@@ -57,11 +43,9 @@ func TestNewServicesSourceApi_UpdatesAndMultipleServices(t *testing.T) {
 		Spec:       api.ServiceSpec{Ports: []api.ServicePort{{Protocol: "TCP", Port: 30}}}}
 
 	// Setup fake api client.
+	client := fake.NewSimpleClientset()
 	fakeWatch := watch.NewFake()
-	lw := fakeLW{
-		listResp:  &api.ServiceList{Items: []api.Service{}},
-		watchResp: fakeWatch,
-	}
+	client.PrependWatchReactor("services", ktesting.DefaultWatchReactor(fakeWatch, nil))
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
@@ -69,32 +53,35 @@ func TestNewServicesSourceApi_UpdatesAndMultipleServices(t *testing.T) {
 	ch := make(chan struct{})
 	handler := newSvcHandler(t, nil, func() { ch <- struct{}{} })
 
-	serviceConfig := newServiceConfig(lw, time.Minute)
+	sharedInformers := informers.NewSharedInformerFactory(client, time.Minute)
+
+	serviceConfig := NewServiceConfig(sharedInformers.Core().InternalVersion().Services(), time.Minute)
 	serviceConfig.RegisterHandler(handler)
+	go sharedInformers.Start(stopCh)
 	go serviceConfig.Run(stopCh)
 
 	// Add the first service
-	handler.expected = []api.Service{*service1v1}
+	handler.expected = []*api.Service{service1v1}
 	fakeWatch.Add(service1v1)
 	<-ch
 
 	// Add another service
-	handler.expected = []api.Service{*service1v1, *service2}
+	handler.expected = []*api.Service{service1v1, service2}
 	fakeWatch.Add(service2)
 	<-ch
 
 	// Modify service1
-	handler.expected = []api.Service{*service1v2, *service2}
+	handler.expected = []*api.Service{service1v2, service2}
 	fakeWatch.Modify(service1v2)
 	<-ch
 
 	// Delete service1
-	handler.expected = []api.Service{*service2}
+	handler.expected = []*api.Service{service2}
 	fakeWatch.Delete(service1v2)
 	<-ch
 
 	// Delete service2
-	handler.expected = []api.Service{}
+	handler.expected = []*api.Service{}
 	fakeWatch.Delete(service2)
 	<-ch
 }
@@ -130,11 +117,9 @@ func TestNewEndpointsSourceApi_UpdatesAndMultipleEndpoints(t *testing.T) {
 	}
 
 	// Setup fake api client.
+	client := fake.NewSimpleClientset()
 	fakeWatch := watch.NewFake()
-	lw := fakeLW{
-		listResp:  &api.EndpointsList{Items: []api.Endpoints{}},
-		watchResp: fakeWatch,
-	}
+	client.PrependWatchReactor("endpoints", ktesting.DefaultWatchReactor(fakeWatch, nil))
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
@@ -142,8 +127,11 @@ func TestNewEndpointsSourceApi_UpdatesAndMultipleEndpoints(t *testing.T) {
 	ch := make(chan struct{})
 	handler := newEpsHandler(t, nil, func() { ch <- struct{}{} })
 
-	endpointsConfig := newEndpointsConfig(lw, time.Minute)
+	sharedInformers := informers.NewSharedInformerFactory(client, time.Minute)
+
+	endpointsConfig := NewEndpointsConfig(sharedInformers.Core().InternalVersion().Endpoints(), time.Minute)
 	endpointsConfig.RegisterHandler(handler)
+	go sharedInformers.Start(stopCh)
 	go endpointsConfig.Run(stopCh)
 
 	// Add the first endpoints
@@ -174,15 +162,15 @@ func TestNewEndpointsSourceApi_UpdatesAndMultipleEndpoints(t *testing.T) {
 
 type svcHandler struct {
 	t        *testing.T
-	expected []api.Service
+	expected []*api.Service
 	done     func()
 }
 
-func newSvcHandler(t *testing.T, svcs []api.Service, done func()) *svcHandler {
+func newSvcHandler(t *testing.T, svcs []*api.Service, done func()) *svcHandler {
 	return &svcHandler{t: t, expected: svcs, done: done}
 }
 
-func (s *svcHandler) OnServiceUpdate(services []api.Service) {
+func (s *svcHandler) OnServiceUpdate(services []*api.Service) {
 	defer s.done()
 	sort.Sort(sortedServices(services))
 	if !reflect.DeepEqual(s.expected, services) {
@@ -229,26 +217,19 @@ func TestInitialSync(t *testing.T) {
 	wg.Add(2)
 
 	// Setup fake api client.
-	fakeSvcWatch := watch.NewFake()
-	svcLW := fakeLW{
-		listResp:  &api.ServiceList{Items: []api.Service{*svc1, *svc2}},
-		watchResp: fakeSvcWatch,
-	}
-	fakeEpsWatch := watch.NewFake()
-	epsLW := fakeLW{
-		listResp:  &api.EndpointsList{Items: []api.Endpoints{*eps2, *eps1}},
-		watchResp: fakeEpsWatch,
-	}
+	client := fake.NewSimpleClientset(svc1, svc2, eps2, eps1)
+	sharedInformers := informers.NewSharedInformerFactory(client, 0)
 
-	svcConfig := newServiceConfig(svcLW, time.Minute)
-	epsConfig := newEndpointsConfig(epsLW, time.Minute)
-	svcHandler := newSvcHandler(t, []api.Service{*svc2, *svc1}, wg.Done)
+	svcConfig := NewServiceConfig(sharedInformers.Core().InternalVersion().Services(), 0)
+	epsConfig := NewEndpointsConfig(sharedInformers.Core().InternalVersion().Endpoints(), 0)
+	svcHandler := newSvcHandler(t, []*api.Service{svc2, svc1}, wg.Done)
 	svcConfig.RegisterHandler(svcHandler)
 	epsHandler := newEpsHandler(t, []*api.Endpoints{eps2, eps1}, wg.Done)
 	epsConfig.RegisterHandler(epsHandler)
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
+	go sharedInformers.Start(stopCh)
 	go svcConfig.Run(stopCh)
 	go epsConfig.Run(stopCh)
 	wg.Wait()

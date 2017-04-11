@@ -57,6 +57,7 @@ pkg/api/errors
 pkg/api/events
 pkg/api/install
 pkg/api/meta
+pkg/api/pod
 pkg/api/resource
 pkg/api/service
 pkg/api/v1
@@ -178,6 +179,7 @@ pkg/controller/volume/attachdetach/reconciler
 pkg/conversion
 pkg/conversion/queryparams
 pkg/credentialprovider/aws
+pkg/fieldpath
 pkg/fields
 pkg/hyperkube
 pkg/kubelet/api
@@ -279,6 +281,8 @@ plugin/pkg/admission/gc
 plugin/pkg/admission/imagepolicy
 plugin/pkg/admission/namespace/autoprovision
 plugin/pkg/admission/namespace/exists
+plugin/pkg/admission/podtolerationrestriction/apis/podtolerationrestriction/install
+plugin/pkg/admission/podtolerationrestriction/apis/podtolerationrestriction/validation
 plugin/pkg/admission/resourcequota/apis/resourcequota/install
 plugin/pkg/admission/resourcequota/apis/resourcequota/validation
 plugin/pkg/admission/securitycontext/scdeny
@@ -286,6 +290,9 @@ plugin/pkg/auth
 plugin/pkg/auth/authenticator/token/bootstrap
 plugin/pkg/auth/authorizer
 plugin/pkg/auth/authorizer/rbac/bootstrappolicy
+plugin/pkg/scheduler
+plugin/pkg/scheduler/algorithmprovider
+plugin/pkg/scheduler/algorithmprovider/defaults
 plugin/pkg/scheduler/api/validation
 staging/src/k8s.io/apimachinery/pkg/api/equality
 staging/src/k8s.io/apimachinery/pkg/api/errors
@@ -301,6 +308,7 @@ staging/src/k8s.io/apimachinery/pkg/util/json
 staging/src/k8s.io/apimachinery/pkg/util/validation/field
 staging/src/k8s.io/apimachinery/pkg/version
 staging/src/k8s.io/apimachinery/pkg/watch
+staging/src/k8s.io/apiserver/pkg/admission/initializer
 staging/src/k8s.io/apiserver/pkg/apis/apiserver/install
 staging/src/k8s.io/apiserver/pkg/apis/example/install
 staging/src/k8s.io/apiserver/pkg/authentication/authenticator

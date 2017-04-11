@@ -40,7 +40,7 @@ import (
 )
 
 var (
-	attach_example = templates.Examples(`
+	attach_example = templates.Examples(i18n.T(`
 		# Get output from running pod 123456-7890, using the first container by default
 		kubectl attach 123456-7890
 
@@ -53,7 +53,7 @@ var (
 
 		# Get output from the first pod of a ReplicaSet named nginx
 		kubectl attach rs/nginx
-		`)
+		`))
 )
 
 const (
@@ -146,7 +146,7 @@ func (p *AttachOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, argsIn [
 	}
 
 	mapper, typer := f.Object()
-	builder := resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
+	builder := resource.NewBuilder(mapper, f.CategoryExpander(), typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
 		NamespaceParam(namespace).DefaultNamespace()
 
 	switch len(argsIn) {

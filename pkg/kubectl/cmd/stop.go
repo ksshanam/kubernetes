@@ -28,16 +28,16 @@ import (
 )
 
 var (
-	stop_long = templates.LongDesc(`
+	stop_long = templates.LongDesc(i18n.T(`
 		Deprecated: Gracefully shut down a resource by name or filename.
 
 		The stop command is deprecated, all its functionalities are covered by delete command.
 		See 'kubectl delete --help' for more details.
 
 		Attempts to shut down and delete a resource that supports graceful termination.
-		If the resource is scalable it will be scaled to 0 before deletion.`)
+		If the resource is scalable it will be scaled to 0 before deletion.`))
 
-	stop_example = templates.Examples(`
+	stop_example = templates.Examples(i18n.T(`
 		# Shut down foo.
 		kubectl stop replicationcontroller foo
 
@@ -48,7 +48,7 @@ var (
 		kubectl stop -f service.json
 
 		# Shut down all resources in the path/to/resources directory
-		kubectl stop -f path/to/resources`)
+		kubectl stop -f path/to/resources`))
 )
 
 func NewCmdStop(f cmdutil.Factory, out io.Writer) *cobra.Command {
@@ -84,7 +84,7 @@ func RunStop(f cmdutil.Factory, cmd *cobra.Command, args []string, out io.Writer
 	}
 
 	mapper, typer := f.Object()
-	r := resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
+	r := resource.NewBuilder(mapper, f.CategoryExpander(), typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
 		ResourceTypeOrNameArgs(false, args...).

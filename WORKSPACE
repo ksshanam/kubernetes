@@ -1,6 +1,6 @@
 git_repository(
     name = "io_bazel_rules_go",
-    commit = "7828452850597b52b49ec603b23f8ad2bcb22aed",
+    commit = "cfdcbdc1d17e6dc3c48bbda4fce760949e58e381",
     remote = "https://github.com/bazelbuild/rules_go.git",
 )
 
@@ -18,14 +18,16 @@ git_repository(
 
 load("@io_bazel_rules_go//go:def.bzl", "go_repositories")
 
-go_repositories()
+go_repositories(
+    go_version = "1.7.5",
+)
 
 # for building docker base images
 debs = (
     (
         "busybox_deb",
-        "f262cc9cf893740bb70c3dd01da9429b858c94be696badd4a702e0a8c7f6f80b",
-        "http://ftp.us.debian.org/debian/pool/main/b/busybox/busybox-static_1.22.0-19+b1_amd64.deb",
+        "7465567f5e5255188b1d004d7081066cd79f77a5c18a5d418d27966d698e0bef",
+        "http://ftp.us.debian.org/debian/pool/main/b/busybox/busybox-static_1.22.0-19+b2_amd64.deb",
     ),
     (
         "libc_deb",

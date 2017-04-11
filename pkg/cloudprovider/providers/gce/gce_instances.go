@@ -17,6 +17,7 @@ limitations under the License.
 package gce
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -283,7 +284,8 @@ func (gce *GCECloud) getInstanceByName(name string) (*gceInstance, error) {
 	// Avoid changing behaviour when not managing multiple zones
 	for _, zone := range gce.managedZones {
 		name = canonicalizeInstanceName(name)
-		res, err := gce.service.Instances.Get(gce.projectID, zone, name).Do()
+		dc := contextWithNamespace(name, "gce_instance_list")
+		res, err := gce.service.Instances.Get(gce.projectID, zone, name).Context(dc).Do()
 		if err != nil {
 			glog.Errorf("getInstanceByName: failed to get instance %s; err: %v", name, err)
 
@@ -348,4 +350,18 @@ func (gce *GCECloud) isCurrentInstance(instanceID string) bool {
 	}
 
 	return currentInstanceID == canonicalizeInstanceName(instanceID)
+}
+
+// NodeAddressesByProviderID returns the node addresses of an instances with the specified unique providerID
+// This method will not be called from the node that is requesting this ID. i.e. metadata service
+// and other local methods cannot be used here
+func (gce *GCECloud) NodeAddressesByProviderID(providerID string) ([]v1.NodeAddress, error) {
+	return []v1.NodeAddress{}, errors.New("unimplemented")
+}
+
+// InstanceTypeByProviderID returns the cloudprovider instance type of the node with the specified unique providerID
+// This method will not be called from the node that is requesting this ID. i.e. metadata service
+// and other local methods cannot be used here
+func (gce *GCECloud) InstanceTypeByProviderID(providerID string) (string, error) {
+	return "", errors.New("unimplemented")
 }

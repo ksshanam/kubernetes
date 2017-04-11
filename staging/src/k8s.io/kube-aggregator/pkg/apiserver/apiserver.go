@@ -178,8 +178,9 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 		endpointsLister: s.endpointsLister,
 	}
 	s.GenericAPIServer.HandlerContainer.Handle("/apis", apisHandler)
+	s.GenericAPIServer.HandlerContainer.Handle("/apis/", apisHandler)
 
-	apiserviceRegistrationController := NewAPIServiceRegistrationController(informerFactory.Apiregistration().InternalVersion().APIServices(), s)
+	apiserviceRegistrationController := NewAPIServiceRegistrationController(informerFactory.Apiregistration().InternalVersion().APIServices(), kubeInformers.Core().V1().Services(), s)
 
 	s.GenericAPIServer.AddPostStartHook("start-kube-aggregator-informers", func(context genericapiserver.PostStartHookContext) error {
 		informerFactory.Start(stopCh)
@@ -196,17 +197,17 @@ func (c completedConfig) NewWithDelegate(delegationTarget genericapiserver.Deleg
 
 // AddAPIService adds an API service.  It is not thread-safe, so only call it on one thread at a time please.
 // It's a slow moving API, so its ok to run the controller on a single thread
-func (s *APIAggregator) AddAPIService(apiService *apiregistration.APIService) {
+func (s *APIAggregator) AddAPIService(apiService *apiregistration.APIService, destinationHost string) {
 	// if the proxyHandler already exists, it needs to be updated. The aggregation bits do not
 	// since they are wired against listers because they require multiple resources to respond
 	if proxyHandler, exists := s.proxyHandlers[apiService.Name]; exists {
-		proxyHandler.updateAPIService(apiService)
+		proxyHandler.updateAPIService(apiService, destinationHost)
 		return
 	}
 
 	proxyPath := "/apis/" + apiService.Spec.Group + "/" + apiService.Spec.Version
 	// v1. is a special case for the legacy API.  It proxies to a wider set of endpoints.
-	if apiService.Name == "v1." {
+	if apiService.Name == legacyAPIServiceName {
 		proxyPath = "/api"
 	}
 
@@ -217,7 +218,7 @@ func (s *APIAggregator) AddAPIService(apiService *apiregistration.APIService) {
 		proxyClientCert: s.proxyClientCert,
 		proxyClientKey:  s.proxyClientKey,
 	}
-	proxyHandler.updateAPIService(apiService)
+	proxyHandler.updateAPIService(apiService, destinationHost)
 	s.proxyHandlers[apiService.Name] = proxyHandler
 	s.GenericAPIServer.HandlerContainer.ServeMux.Handle(proxyPath, proxyHandler)
 	s.GenericAPIServer.HandlerContainer.ServeMux.Handle(proxyPath+"/", proxyHandler)

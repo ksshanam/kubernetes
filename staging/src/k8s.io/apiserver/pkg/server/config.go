@@ -96,6 +96,8 @@ type Config struct {
 	EnableContentionProfiling bool
 	EnableMetrics             bool
 
+	DisabledPostStartHooks sets.String
+
 	// Version will enable the /version endpoint if non-nil
 	Version *version.Info
 	// AuditWriter is the destination for audit logs.  If nil, they will not be written.
@@ -116,8 +118,8 @@ type Config struct {
 	// Fields you probably don't care about changing
 	//===========================================================================
 
-	// BuildHandlerChainsFunc allows you to build custom handler chains by decorating the apiHandler.
-	BuildHandlerChainsFunc func(apiHandler http.Handler, c *Config) (secure, insecure http.Handler)
+	// BuildHandlerChainFunc allows you to build custom handler chains by decorating the apiHandler.
+	BuildHandlerChainFunc func(apiHandler http.Handler, c *Config) (secure http.Handler)
 	// DiscoveryAddresses is used to build the IPs pass to discovery.  If nil, the ExternalAddress is
 	// always reported
 	DiscoveryAddresses DiscoveryAddresses
@@ -152,10 +154,6 @@ type Config struct {
 	// Predicate which is true for paths of long-running http requests
 	LongRunningFunc genericfilters.LongRunningRequestCheck
 
-	// InsecureServingInfo is required to serve http.  HTTP does NOT include authentication or authorization.
-	// You shouldn't be using this.  It makes sig-auth sad.
-	InsecureServingInfo *ServingInfo
-
 	//===========================================================================
 	// values below here are targets for removal
 	//===========================================================================
@@ -169,16 +167,12 @@ type Config struct {
 	PublicAddress net.IP
 }
 
-type ServingInfo struct {
+type SecureServingInfo struct {
 	// BindAddress is the ip:port to serve on
 	BindAddress string
 	// BindNetwork is the type of network to bind to - defaults to "tcp", accepts "tcp",
 	// "tcp4", and "tcp6".
 	BindNetwork string
-}
-
-type SecureServingInfo struct {
-	ServingInfo
 
 	// Cert is the main server cert which is used if SNI does not match. Cert must be non-nil and is
 	// allowed to be in SNICerts.
@@ -193,6 +187,14 @@ type SecureServingInfo struct {
 
 	// ClientCA is the certificate bundle for all the signers that you'll recognize for incoming client certificates
 	ClientCA *x509.CertPool
+
+	// MinTLSVersion optionally overrides the minimum TLS version supported.
+	// Values are from tls package constants (https://golang.org/pkg/crypto/tls/#pkg-constants).
+	MinTLSVersion uint16
+
+	// CipherSuites optionally overrides the list of allowed cipher suites for the server.
+	// Values are from tls package constants (https://golang.org/pkg/crypto/tls/#pkg-constants).
+	CipherSuites []uint16
 }
 
 // NewConfig returns a Config struct with the default values
@@ -201,8 +203,9 @@ func NewConfig(codecs serializer.CodecFactory) *Config {
 		Serializer:                  codecs,
 		ReadWritePort:               443,
 		RequestContextMapper:        apirequest.NewRequestContextMapper(),
-		BuildHandlerChainsFunc:      DefaultBuildHandlerChain,
+		BuildHandlerChainFunc:       DefaultBuildHandlerChain,
 		LegacyAPIGroupPrefixes:      sets.NewString(DefaultLegacyAPIPrefix),
+		DisabledPostStartHooks:      sets.NewString(),
 		HealthzChecks:               []healthz.HealthzChecker{healthz.PingHealthz},
 		EnableIndex:                 true,
 		EnableDiscovery:             true,
@@ -402,9 +405,8 @@ func (c completedConfig) constructServer() (*GenericAPIServer, error) {
 
 		minRequestTimeout: time.Duration(c.MinRequestTimeout) * time.Second,
 
-		SecureServingInfo:   c.SecureServingInfo,
-		InsecureServingInfo: c.InsecureServingInfo,
-		ExternalAddress:     c.ExternalAddress,
+		SecureServingInfo: c.SecureServingInfo,
+		ExternalAddress:   c.ExternalAddress,
 
 		apiGroupsForDiscovery: map[string]metav1.APIGroup{},
 
@@ -416,8 +418,10 @@ func (c completedConfig) constructServer() (*GenericAPIServer, error) {
 		swaggerConfig: c.SwaggerConfig,
 		openAPIConfig: c.OpenAPIConfig,
 
-		postStartHooks: map[string]postStartHookEntry{},
-		healthzChecks:  c.HealthzChecks,
+		postStartHooks:         map[string]postStartHookEntry{},
+		disabledPostStartHooks: c.DisabledPostStartHooks,
+
+		healthzChecks: c.HealthzChecks,
 	}
 
 	return s, nil
@@ -477,33 +481,23 @@ func (c completedConfig) buildHandlers(s *GenericAPIServer, delegate http.Handle
 
 	installAPI(s, c.Config, delegate)
 
-	s.Handler, s.InsecureHandler = c.BuildHandlerChainsFunc(s.HandlerContainer.ServeMux, c.Config)
+	s.Handler = c.BuildHandlerChainFunc(s.HandlerContainer.ServeMux, c.Config)
 
 	return s, nil
 }
 
-func DefaultBuildHandlerChain(apiHandler http.Handler, c *Config) (secure, insecure http.Handler) {
-	generic := func(handler http.Handler) http.Handler {
-		handler = genericfilters.WithCORS(handler, c.CorsAllowedOriginList, nil, nil, nil, "true")
-		handler = genericfilters.WithPanicRecovery(handler, c.RequestContextMapper)
-		handler = genericfilters.WithTimeoutForNonLongRunningRequests(handler, c.RequestContextMapper, c.LongRunningFunc)
-		handler = genericfilters.WithMaxInFlightLimit(handler, c.MaxRequestsInFlight, c.MaxMutatingRequestsInFlight, c.RequestContextMapper, c.LongRunningFunc)
-		handler = genericapifilters.WithRequestInfo(handler, NewRequestInfoResolver(c), c.RequestContextMapper)
-		handler = apirequest.WithRequestContext(handler, c.RequestContextMapper)
-		return handler
-	}
-	audit := func(handler http.Handler) http.Handler {
-		return genericapifilters.WithAudit(handler, c.RequestContextMapper, c.AuditWriter)
-	}
-	protect := func(handler http.Handler) http.Handler {
-		handler = genericapifilters.WithAuthorization(handler, c.RequestContextMapper, c.Authorizer)
-		handler = genericapifilters.WithImpersonation(handler, c.RequestContextMapper, c.Authorizer)
-		handler = audit(handler) // before impersonation to read original user
-		handler = genericapifilters.WithAuthentication(handler, c.RequestContextMapper, c.Authenticator, genericapifilters.Unauthorized(c.SupportsBasicAuth))
-		return handler
-	}
-
-	return generic(protect(apiHandler)), generic(audit(apiHandler))
+func DefaultBuildHandlerChain(apiHandler http.Handler, c *Config) http.Handler {
+	handler := genericapifilters.WithAuthorization(apiHandler, c.RequestContextMapper, c.Authorizer)
+	handler = genericapifilters.WithImpersonation(handler, c.RequestContextMapper, c.Authorizer)
+	handler = genericapifilters.WithAudit(handler, c.RequestContextMapper, c.AuditWriter)
+	handler = genericapifilters.WithAuthentication(handler, c.RequestContextMapper, c.Authenticator, genericapifilters.Unauthorized(c.SupportsBasicAuth))
+	handler = genericfilters.WithCORS(handler, c.CorsAllowedOriginList, nil, nil, nil, "true")
+	handler = genericfilters.WithPanicRecovery(handler)
+	handler = genericfilters.WithTimeoutForNonLongRunningRequests(handler, c.RequestContextMapper, c.LongRunningFunc)
+	handler = genericfilters.WithMaxInFlightLimit(handler, c.MaxRequestsInFlight, c.MaxMutatingRequestsInFlight, c.RequestContextMapper, c.LongRunningFunc)
+	handler = genericapifilters.WithRequestInfo(handler, NewRequestInfoResolver(c), c.RequestContextMapper)
+	handler = apirequest.WithRequestContext(handler, c.RequestContextMapper)
+	return handler
 }
 
 func installAPI(s *GenericAPIServer, c *Config, delegate http.Handler) {

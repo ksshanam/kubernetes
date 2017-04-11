@@ -37,7 +37,7 @@ import (
 )
 
 var (
-	logs_example = templates.Examples(`
+	logs_example = templates.Examples(i18n.T(`
 		# Return snapshot logs from pod nginx with only one container
 		kubectl logs nginx
 
@@ -60,7 +60,7 @@ var (
 		kubectl logs job/hello
 
 		# Return snapshot logs from container nginx-1 of a deployment named nginx
-		kubectl logs deployment/nginx -c nginx-1`)
+		kubectl logs deployment/nginx -c nginx-1`))
 
 	selectorTail int64 = 10
 )
@@ -198,7 +198,7 @@ func (o *LogsOptions) Complete(f cmdutil.Factory, out io.Writer, cmd *cobra.Comm
 	mapper, typer := f.Object()
 	decoder := f.Decoder(true)
 	if o.Object == nil {
-		builder := resource.NewBuilder(mapper, typer, o.ClientMapper, decoder).
+		builder := resource.NewBuilder(mapper, f.CategoryExpander(), typer, o.ClientMapper, decoder).
 			NamespaceParam(o.Namespace).DefaultNamespace().
 			SingleResourceType()
 		if o.ResourceArg != "" {

@@ -105,11 +105,10 @@ type GenericAPIServer struct {
 	// The registered APIs
 	HandlerContainer *genericmux.APIContainer
 
-	SecureServingInfo   *SecureServingInfo
-	InsecureServingInfo *ServingInfo
+	SecureServingInfo *SecureServingInfo
 
 	// numerical ports, set after listening
-	effectiveSecurePort, effectiveInsecurePort int
+	effectiveSecurePort int
 
 	// ExternalAddress is the address (hostname or IP and port) that should be used in
 	// external (public internet) URLs for this GenericAPIServer.
@@ -123,8 +122,7 @@ type GenericAPIServer struct {
 	Serializer runtime.NegotiatedSerializer
 
 	// "Outputs"
-	Handler         http.Handler
-	InsecureHandler http.Handler
+	Handler http.Handler
 	// FallThroughHandler is the final HTTP handler in the chain.
 	// It comes after all filters and the API handling
 	FallThroughHandler *mux.PathRecorderMux
@@ -145,10 +143,11 @@ type GenericAPIServer struct {
 
 	// PostStartHooks are each called after the server has started listening, in a separate go func for each
 	// with no guarantee of ordering between them.  The map key is a name used for error reporting.
-	// It may kill the process with a panic if it wishes to by returning an error
-	postStartHookLock    sync.Mutex
-	postStartHooks       map[string]postStartHookEntry
-	postStartHooksCalled bool
+	// It may kill the process with a panic if it wishes to by returning an error.
+	postStartHookLock      sync.Mutex
+	postStartHooks         map[string]postStartHookEntry
+	postStartHooksCalled   bool
+	disabledPostStartHooks sets.String
 
 	// healthz checks
 	healthzLock    sync.Mutex
@@ -277,13 +276,6 @@ func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) error {
 		}
 	}
 
-	if s.InsecureServingInfo != nil && s.InsecureHandler != nil {
-		if err := s.serveInsecurely(internalStopCh); err != nil {
-			close(internalStopCh)
-			return err
-		}
-	}
-
 	// Now that both listeners have bound successfully, it is the
 	// responsibility of the caller to close the provided channel to
 	// ensure cleanup.
@@ -399,6 +391,8 @@ func (s *GenericAPIServer) InstallAPIGroup(apiGroupInfo *APIGroupInfo) error {
 	return nil
 }
 
+// AddAPIGroupForDiscovery adds the specified group to the list served to discovery queries.
+// Groups are listed in the order they are added.
 func (s *GenericAPIServer) AddAPIGroupForDiscovery(apiGroup metav1.APIGroup) {
 	s.apiGroupsForDiscoveryLock.Lock()
 	defer s.apiGroupsForDiscoveryLock.Unlock()

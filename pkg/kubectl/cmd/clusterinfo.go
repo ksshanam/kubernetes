@@ -34,13 +34,13 @@ import (
 )
 
 var (
-	longDescr = templates.LongDesc(`
+	longDescr = templates.LongDesc(i18n.T(`
   Display addresses of the master and services with label kubernetes.io/cluster-service=true
-  To further debug and diagnose cluster problems, use 'kubectl cluster-info dump'.`)
+  To further debug and diagnose cluster problems, use 'kubectl cluster-info dump'.`))
 
-	clusterinfo_example = templates.Examples(`
+	clusterinfo_example = templates.Examples(i18n.T(`
 		# Print the address of the master and cluster services
-		kubectl cluster-info`)
+		kubectl cluster-info`))
 )
 
 func NewCmdClusterInfo(f cmdutil.Factory, out io.Writer) *cobra.Command {
@@ -79,7 +79,7 @@ func RunClusterInfo(f cmdutil.Factory, out io.Writer, cmd *cobra.Command) error 
 	}
 
 	// TODO use generalized labels once they are implemented (#341)
-	b := resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
+	b := resource.NewBuilder(mapper, f.CategoryExpander(), typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
 		NamespaceParam(cmdNamespace).DefaultNamespace().
 		SelectorParam("kubernetes.io/cluster-service=true").
 		ResourceTypeOrNameArgs(false, []string{"services"}...).
