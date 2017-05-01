@@ -52,6 +52,7 @@ import (
 	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/v1"
+	v1helper "k8s.io/kubernetes/pkg/api/v1/helper"
 	"k8s.io/kubernetes/pkg/client/unversioned/remotecommand"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
@@ -748,7 +749,7 @@ func (dm *DockerManager) runContainer(
 
 	// Set sysctls if requested
 	if container.Name == PodInfraContainerName {
-		sysctls, unsafeSysctls, err := v1.SysctlsFromPodAnnotations(pod.Annotations)
+		sysctls, unsafeSysctls, err := v1helper.SysctlsFromPodAnnotations(pod.Annotations)
 		if err != nil {
 			dm.recorder.Eventf(ref, v1.EventTypeWarning, events.FailedToCreateContainer, "Failed to create docker container %q of pod %q with error: %v", container.Name, format.Pod(pod), err)
 			return kubecontainer.ContainerID{}, err
@@ -1886,7 +1887,6 @@ type versionInfo struct {
 // -1: older than expected version
 // 0 : same version
 func (dm *DockerManager) checkDockerAPIVersion(expectedVersion string) (int, error) {
-
 	value, err := dm.versionCache.Get(dm.machineInfo.MachineID)
 	if err != nil {
 		return 0, err
@@ -2371,7 +2371,7 @@ func (dm *DockerManager) SyncPod(pod *v1.Pod, _ v1.PodStatus, podStatus *kubecon
 		glog.V(4).Infof("Creating init container %+v in pod %v", container, format.Pod(pod))
 		if err, msg := dm.tryContainerStart(container, pod, podStatus, pullSecrets, namespaceMode, pidMode, podIP); err != nil {
 			startContainerResult.Fail(err, msg)
-			utilruntime.HandleError(fmt.Errorf("container start failed: %v: %s", err, msg))
+			glog.V(3).Infof("container start failed: %v: %s", err, msg)
 			return
 		}
 
@@ -2409,7 +2409,7 @@ func (dm *DockerManager) SyncPod(pod *v1.Pod, _ v1.PodStatus, podStatus *kubecon
 		glog.V(4).Infof("Creating container %+v in pod %v", container, format.Pod(pod))
 		if err, msg := dm.tryContainerStart(container, pod, podStatus, pullSecrets, namespaceMode, pidMode, podIP); err != nil {
 			startContainerResult.Fail(err, msg)
-			utilruntime.HandleError(fmt.Errorf("container start failed: %v: %s", err, msg))
+			glog.V(3).Infof("container start failed: %v: %s", err, msg)
 			continue
 		}
 	}

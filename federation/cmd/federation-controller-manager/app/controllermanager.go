@@ -36,15 +36,14 @@ import (
 	federationclientset "k8s.io/kubernetes/federation/client/clientset_generated/federation_clientset"
 	"k8s.io/kubernetes/federation/cmd/federation-controller-manager/app/options"
 	"k8s.io/kubernetes/federation/pkg/dnsprovider"
+	"k8s.io/kubernetes/federation/pkg/federatedtypes"
 	clustercontroller "k8s.io/kubernetes/federation/pkg/federation-controller/cluster"
-	configmapcontroller "k8s.io/kubernetes/federation/pkg/federation-controller/configmap"
-	daemonsetcontroller "k8s.io/kubernetes/federation/pkg/federation-controller/daemonset"
 	deploymentcontroller "k8s.io/kubernetes/federation/pkg/federation-controller/deployment"
 	ingresscontroller "k8s.io/kubernetes/federation/pkg/federation-controller/ingress"
 	namespacecontroller "k8s.io/kubernetes/federation/pkg/federation-controller/namespace"
 	replicasetcontroller "k8s.io/kubernetes/federation/pkg/federation-controller/replicaset"
-	secretcontroller "k8s.io/kubernetes/federation/pkg/federation-controller/secret"
 	servicecontroller "k8s.io/kubernetes/federation/pkg/federation-controller/service"
+	synccontroller "k8s.io/kubernetes/federation/pkg/federation-controller/sync"
 	"k8s.io/kubernetes/pkg/util/configz"
 	"k8s.io/kubernetes/pkg/version"
 
@@ -159,20 +158,10 @@ func StartControllers(s *options.CMServer, restClientCfg *restclient.Config) err
 		namespaceController.Run(wait.NeverStop)
 	}
 
-	if controllerEnabled(s.Controllers, serverResources, secretcontroller.ControllerName, secretcontroller.RequiredResources, true) {
-		secretcontroller.StartSecretController(restClientCfg, stopChan, minimizeLatency)
-	}
-
-	if controllerEnabled(s.Controllers, serverResources, configmapcontroller.ControllerName, configmapcontroller.RequiredResources, true) {
-		configmapcontrollerClientset := federationclientset.NewForConfigOrDie(restclient.AddUserAgent(restClientCfg, "configmap-controller"))
-		configmapcontroller := configmapcontroller.NewConfigMapController(configmapcontrollerClientset)
-		configmapcontroller.Run(wait.NeverStop)
-	}
-
-	if controllerEnabled(s.Controllers, serverResources, daemonsetcontroller.ControllerName, daemonsetcontroller.RequiredResources, true) {
-		daemonsetcontrollerClientset := federationclientset.NewForConfigOrDie(restclient.AddUserAgent(restClientCfg, "daemonset-controller"))
-		daemonsetcontroller := daemonsetcontroller.NewDaemonSetController(daemonsetcontrollerClientset)
-		daemonsetcontroller.Run(wait.NeverStop)
+	for kind, federatedType := range federatedtypes.FederatedTypes() {
+		if controllerEnabled(s.Controllers, serverResources, federatedType.ControllerName, federatedType.RequiredResources, true) {
+			synccontroller.StartFederationSyncController(kind, federatedType.AdapterFactory, restClientCfg, stopChan, minimizeLatency)
+		}
 	}
 
 	if controllerEnabled(s.Controllers, serverResources, replicasetcontroller.ControllerName, replicasetcontroller.RequiredResources, true) {

@@ -25,7 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	k8stype "k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/api/v1"
-	storage "k8s.io/kubernetes/pkg/apis/storage/v1beta1"
+	storage "k8s.io/kubernetes/pkg/apis/storage/v1"
 	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
 	vsphere "k8s.io/kubernetes/pkg/cloudprovider/providers/vsphere"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -84,7 +84,7 @@ var _ = framework.KubeDescribe("vsphere volume operations storm [Volume]", func(
 			framework.DeletePersistentVolumeClaim(client, claim.Name, namespace)
 		}
 		By("Deleting StorageClass")
-		err = client.StorageV1beta1().StorageClasses().Delete(storageclass.Name, nil)
+		err = client.StorageV1().StorageClasses().Delete(storageclass.Name, nil)
 		Expect(err).NotTo(HaveOccurred())
 	})
 
@@ -93,27 +93,30 @@ var _ = framework.KubeDescribe("vsphere volume operations storm [Volume]", func(
 		By("Creating Storage Class")
 		scParameters := make(map[string]string)
 		scParameters["diskformat"] = "thin"
-		storageclass, err = client.StorageV1beta1().StorageClasses().Create(getVSphereStorageClassSpec("thinsc", scParameters))
+		storageclass, err = client.StorageV1().StorageClasses().Create(getVSphereStorageClassSpec("thinsc", scParameters))
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Creating PVCs using the Storage Class")
 		count := 0
 		for count < volume_ops_scale {
-			pvclaims[count] = framework.CreatePVC(client, namespace, getVSphereClaimSpecWithStorageClassAnnotation(namespace, storageclass))
+			pvclaims[count], err = framework.CreatePVC(client, namespace, getVSphereClaimSpecWithStorageClassAnnotation(namespace, storageclass))
+			Expect(err).NotTo(HaveOccurred())
 			count++
 		}
 
 		By("Waiting for all claims to be in bound phase")
-		persistentvolumes = framework.WaitForPVClaimBoundPhase(client, pvclaims)
+		persistentvolumes, err = framework.WaitForPVClaimBoundPhase(client, pvclaims)
+		Expect(err).NotTo(HaveOccurred())
 
 		By("Creating pod to attach PVs to the node")
-		pod := framework.CreatePod(client, namespace, pvclaims, false, "")
+		pod, err := framework.CreatePod(client, namespace, pvclaims, false, "")
+		Expect(err).NotTo(HaveOccurred())
 
 		By("Verify all volumes are accessible and available in the pod")
 		verifyVSphereVolumesAccessible(pod, persistentvolumes, vsp)
 
 		By("Deleting pod")
-		framework.DeletePodWithWait(f, client, pod)
+		framework.ExpectNoError(framework.DeletePodWithWait(f, client, pod))
 
 		By("Waiting for volumes to be detached from the node")
 		for _, pv := range persistentvolumes {
