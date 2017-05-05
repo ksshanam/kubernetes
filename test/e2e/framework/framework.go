@@ -53,7 +53,8 @@ import (
 )
 
 const (
-	maxKubectlExecRetries = 5
+	maxKubectlExecRetries           = 5
+	DefaultNamespaceDeletionTimeout = 5 * time.Minute
 )
 
 // Framework supports common operations used by e2e tests; it will keep a client & a namespace for you.
@@ -244,7 +245,7 @@ func (f *Framework) AfterEach() {
 		if TestContext.DeleteNamespace && (TestContext.DeleteNamespaceOnFailure || !CurrentGinkgoTestDescription().Failed) {
 			for _, ns := range f.namespacesToDelete {
 				By(fmt.Sprintf("Destroying namespace %q for this suite.", ns.Name))
-				timeout := 5 * time.Minute
+				timeout := DefaultNamespaceDeletionTimeout
 				if f.NamespaceDeletionTimeout != 0 {
 					timeout = f.NamespaceDeletionTimeout
 				}
@@ -257,12 +258,11 @@ func (f *Framework) AfterEach() {
 				}
 			}
 		} else {
-			if TestContext.DeleteNamespace {
+			if !TestContext.DeleteNamespace {
 				Logf("Found DeleteNamespace=false, skipping namespace deletion!")
-			} else if TestContext.DeleteNamespaceOnFailure {
-				Logf("Found DeleteNamespaceOnFailure=false, skipping namespace deletion!")
+			} else {
+				Logf("Found DeleteNamespaceOnFailure=false and current test failed, skipping namespace deletion!")
 			}
-
 		}
 
 		// Paranoia-- prevent reuse!
