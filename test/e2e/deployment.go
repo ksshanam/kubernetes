@@ -21,8 +21,10 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -30,7 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/kubernetes/pkg/api/annotations"
 	"k8s.io/kubernetes/pkg/api/v1"
 	extensionsinternal "k8s.io/kubernetes/pkg/apis/extensions"
 	extensions "k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
@@ -42,6 +43,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/test/e2e/framework"
+	testutil "k8s.io/kubernetes/test/utils"
 )
 
 const (
@@ -59,14 +61,20 @@ var (
 )
 
 var _ = framework.KubeDescribe("Deployment", func() {
+	var ns string
+	var c clientset.Interface
+
+	AfterEach(func() {
+		failureTrap(c, ns)
+	})
+
 	f := framework.NewDefaultFramework("deployment")
 
-	// TODO: Add failure traps once we have JustAfterEach
-	// See https://github.com/onsi/ginkgo/issues/303
-
-	It("deployment should create new pods", func() {
-		testNewDeployment(f)
+	BeforeEach(func() {
+		c = f.ClientSet
+		ns = f.Namespace.Name
 	})
+
 	It("deployment reaping should cascade to its replica sets and pods", func() {
 		testDeleteDeployment(f)
 	})
@@ -112,9 +120,58 @@ var _ = framework.KubeDescribe("Deployment", func() {
 	It("test Deployment ReplicaSet orphaning and adoption regarding controllerRef", func() {
 		testDeploymentsControllerRef(f)
 	})
+	It("deployment can avoid hash collisions", func() {
+		testDeploymentHashCollisionAvoidance(f)
+	})
 	// TODO: add tests that cover deployment.Spec.MinReadySeconds once we solved clock-skew issues
 	// See https://github.com/kubernetes/kubernetes/issues/29229
 })
+
+func failureTrap(c clientset.Interface, ns string) {
+	deployments, err := c.Extensions().Deployments(ns).List(metav1.ListOptions{LabelSelector: labels.Everything().String()})
+	if err != nil {
+		framework.Logf("Could not list Deployments in namespace %q: %v", ns, err)
+		return
+	}
+	for i := range deployments.Items {
+		d := deployments.Items[i]
+
+		framework.Logf(spew.Sprintf("Deployment %q:\n%+v\n", d.Name, d))
+		_, allOldRSs, newRS, err := deploymentutil.GetAllReplicaSets(&d, c)
+		if err != nil {
+			framework.Logf("Could not list ReplicaSets for Deployment %q: %v", d.Name, err)
+			return
+		}
+		testutil.LogReplicaSetsOfDeployment(&d, allOldRSs, newRS, framework.Logf)
+		rsList := allOldRSs
+		if newRS != nil {
+			rsList = append(rsList, newRS)
+		}
+		testutil.LogPodsOfDeployment(c, &d, rsList, framework.Logf)
+	}
+	// We need print all the ReplicaSets if there are no Deployment object created
+	if len(deployments.Items) != 0 {
+		return
+	}
+	framework.Logf("Log out all the ReplicaSets if there is no deployment created")
+	rss, err := c.ExtensionsV1beta1().ReplicaSets(ns).List(metav1.ListOptions{LabelSelector: labels.Everything().String()})
+	if err != nil {
+		framework.Logf("Could not list ReplicaSets in namespace %q: %v", ns, err)
+		return
+	}
+	for _, rs := range rss.Items {
+		framework.Logf(spew.Sprintf("ReplicaSet %q:\n%+v\n", rs.Name, rs))
+		selector, err := metav1.LabelSelectorAsSelector(rs.Spec.Selector)
+		if err != nil {
+			framework.Logf("failed to get selector of ReplicaSet %s: %v", rs.Name, err)
+		}
+		options := metav1.ListOptions{LabelSelector: selector.String()}
+		podList, err := c.Core().Pods(rs.Namespace).List(options)
+		for _, pod := range podList.Items {
+			framework.Logf(spew.Sprintf("pod: %q:\n%+v\n", pod.Name, pod))
+		}
+	}
+}
 
 func intOrStrP(num int) *intstr.IntOrString {
 	intstr := intstr.FromInt(num)
@@ -193,37 +250,6 @@ func stopDeployment(c clientset.Interface, internalClient internalclientset.Inte
 	}
 }
 
-func testNewDeployment(f *framework.Framework) {
-	ns := f.Namespace.Name
-	c := f.ClientSet
-
-	deploymentName := "test-new-deployment"
-	podLabels := map[string]string{"name": nginxImageName}
-	replicas := int32(1)
-	framework.Logf("Creating simple deployment %s", deploymentName)
-	d := framework.NewDeployment(deploymentName, replicas, podLabels, nginxImageName, nginxImage, extensions.RollingUpdateDeploymentStrategyType)
-	d.Annotations = map[string]string{"test": "should-copy-to-replica-set", annotations.LastAppliedConfigAnnotation: "should-not-copy-to-replica-set"}
-	deploy, err := c.Extensions().Deployments(ns).Create(d)
-	Expect(err).NotTo(HaveOccurred())
-
-	// Wait for it to be updated to revision 1
-	err = framework.WaitForDeploymentRevisionAndImage(c, ns, deploymentName, "1", nginxImage)
-	Expect(err).NotTo(HaveOccurred())
-
-	err = framework.WaitForDeploymentStatusValid(c, deploy)
-	Expect(err).NotTo(HaveOccurred())
-
-	deployment, err := c.Extensions().Deployments(ns).Get(deploymentName, metav1.GetOptions{})
-	Expect(err).NotTo(HaveOccurred())
-	newRS, err := deploymentutil.GetNewReplicaSet(deployment, c)
-	Expect(err).NotTo(HaveOccurred())
-	// Check new RS annotations
-	Expect(newRS.Annotations["test"]).Should(Equal("should-copy-to-replica-set"))
-	Expect(newRS.Annotations[annotations.LastAppliedConfigAnnotation]).Should(Equal(""))
-	Expect(deployment.Annotations["test"]).Should(Equal("should-copy-to-replica-set"))
-	Expect(deployment.Annotations[annotations.LastAppliedConfigAnnotation]).Should(Equal("should-not-copy-to-replica-set"))
-}
-
 func testDeleteDeployment(f *framework.Framework) {
 	ns := f.Namespace.Name
 	c := f.ClientSet
@@ -234,7 +260,7 @@ func testDeleteDeployment(f *framework.Framework) {
 	replicas := int32(1)
 	framework.Logf("Creating simple deployment %s", deploymentName)
 	d := framework.NewDeployment(deploymentName, replicas, podLabels, nginxImageName, nginxImage, extensions.RollingUpdateDeploymentStrategyType)
-	d.Annotations = map[string]string{"test": "should-copy-to-replica-set", annotations.LastAppliedConfigAnnotation: "should-not-copy-to-replica-set"}
+	d.Annotations = map[string]string{"test": "should-copy-to-replica-set", v1.LastAppliedConfigAnnotation: "should-not-copy-to-replica-set"}
 	deploy, err := c.Extensions().Deployments(ns).Create(d)
 	Expect(err).NotTo(HaveOccurred())
 
@@ -1393,4 +1419,48 @@ func orphanDeploymentReplicaSets(c clientset.Interface, d *extensions.Deployment
 	deleteOptions := &metav1.DeleteOptions{OrphanDependents: &trueVar}
 	deleteOptions.Preconditions = metav1.NewUIDPreconditions(string(d.UID))
 	return c.Extensions().Deployments(d.Namespace).Delete(d.Name, deleteOptions)
+}
+
+func testDeploymentHashCollisionAvoidance(f *framework.Framework) {
+	ns := f.Namespace.Name
+	c := f.ClientSet
+
+	deploymentName := "test-hash-collision"
+	framework.Logf("Creating Deployment %q", deploymentName)
+	podLabels := map[string]string{"name": nginxImageName}
+	d := framework.NewDeployment(deploymentName, int32(0), podLabels, nginxImageName, nginxImage, extensions.RollingUpdateDeploymentStrategyType)
+	deployment, err := c.Extensions().Deployments(ns).Create(d)
+	Expect(err).NotTo(HaveOccurred())
+	err = framework.WaitForDeploymentRevisionAndImage(c, ns, deploymentName, "1", nginxImage)
+	Expect(err).NotTo(HaveOccurred())
+
+	// TODO: Switch this to do a non-cascading deletion of the Deployment, mutate the ReplicaSet
+	// once it has no owner reference, then recreate the Deployment if we ever proceed with
+	// https://github.com/kubernetes/kubernetes/issues/44237
+	framework.Logf("Mock a hash collision")
+	newRS, err := deploymentutil.GetNewReplicaSet(deployment, c)
+	Expect(err).NotTo(HaveOccurred())
+	var nilRs *extensions.ReplicaSet
+	Expect(newRS).NotTo(Equal(nilRs))
+	_, err = framework.UpdateReplicaSetWithRetries(c, ns, newRS.Name, func(update *extensions.ReplicaSet) {
+		*update.Spec.Template.Spec.TerminationGracePeriodSeconds = int64(5)
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	framework.Logf("Expect deployment collision counter to increment")
+	if err := wait.PollImmediate(time.Second, time.Minute, func() (bool, error) {
+		d, err := c.Extensions().Deployments(ns).Get(deploymentName, metav1.GetOptions{})
+		if err != nil {
+			framework.Logf("cannot get deployment %q: %v", deploymentName, err)
+			return false, nil
+		}
+		framework.Logf(spew.Sprintf("deployment status: %#v", d.Status))
+		return d.Status.CollisionCount != nil && *d.Status.CollisionCount == int64(1), nil
+	}); err != nil {
+		framework.Failf("Failed to increment collision counter for deployment %q: %v", deploymentName, err)
+	}
+
+	framework.Logf("Expect a new ReplicaSet to be created")
+	err = framework.WaitForDeploymentRevisionAndImage(c, ns, deploymentName, "2", nginxImage)
+	Expect(err).NotTo(HaveOccurred())
 }

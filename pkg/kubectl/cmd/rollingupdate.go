@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/golang/glog"
@@ -32,12 +31,12 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/helper"
 	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/kubectl/util"
 	"k8s.io/kubernetes/pkg/util/i18n"
 )
 
@@ -79,9 +78,7 @@ func NewCmdRollingUpdate(f cmdutil.Factory, out io.Writer) *cobra.Command {
 	options := &resource.FilenameOptions{}
 
 	cmd := &cobra.Command{
-		Use: "rolling-update OLD_CONTROLLER_NAME ([NEW_CONTROLLER_NAME] --image=NEW_CONTAINER_IMAGE | -f NEW_CONTROLLER_SPEC)",
-		// rollingupdate is deprecated.
-		Aliases: []string{"rollingupdate"},
+		Use:     "rolling-update OLD_CONTROLLER_NAME ([NEW_CONTROLLER_NAME] --image=NEW_CONTAINER_IMAGE | -f NEW_CONTROLLER_SPEC)",
 		Short:   i18n.T("Perform a rolling update of the given ReplicationController"),
 		Long:    rollingUpdateLong,
 		Example: rollingUpdateExample,
@@ -143,9 +140,6 @@ func validateArguments(cmd *cobra.Command, filenames, args []string) error {
 }
 
 func RunRollingUpdate(f cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []string, options *resource.FilenameOptions) error {
-	if len(os.Args) > 1 && os.Args[1] == "rollingupdate" {
-		printDeprecationWarning("rolling-update", "rollingupdate")
-	}
 	err := validateArguments(cmd, options.Filenames, args)
 	if err != nil {
 		return err
@@ -205,7 +199,7 @@ func RunRollingUpdate(f cmdutil.Factory, out io.Writer, cmd *cobra.Command, args
 			return err
 		}
 
-		request := resource.NewBuilder(mapper, f.CategoryExpander(), typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
+		request := f.NewBuilder(true).
 			Schema(schema).
 			NamespaceParam(cmdNamespace).DefaultNamespace().
 			FilenameParam(enforceNamespace, &resource.FilenameOptions{Recursive: false, Filenames: []string{filename}}).
@@ -278,7 +272,7 @@ func RunRollingUpdate(f cmdutil.Factory, out io.Writer, cmd *cobra.Command, args
 		}
 		// Update the existing replication controller with pointers to the 'next' controller
 		// and adding the <deploymentKey> label if necessary to distinguish it from the 'next' controller.
-		oldHash, err := helper.HashObject(oldRc, codec)
+		oldHash, err := util.HashObject(oldRc, codec)
 		if err != nil {
 			return err
 		}
@@ -334,10 +328,10 @@ func RunRollingUpdate(f cmdutil.Factory, out io.Writer, cmd *cobra.Command, args
 			oldRcData.WriteString(oldRc.Name)
 			newRcData.WriteString(newRc.Name)
 		} else {
-			if err := f.PrintObject(cmd, mapper, oldRc, oldRcData); err != nil {
+			if err := f.PrintObject(cmd, false, mapper, oldRc, oldRcData); err != nil {
 				return err
 			}
-			if err := f.PrintObject(cmd, mapper, newRc, newRcData); err != nil {
+			if err := f.PrintObject(cmd, false, mapper, newRc, newRcData); err != nil {
 				return err
 			}
 		}
@@ -382,7 +376,7 @@ func RunRollingUpdate(f cmdutil.Factory, out io.Writer, cmd *cobra.Command, args
 		return err
 	}
 	if outputFormat != "" {
-		return f.PrintObject(cmd, mapper, newRc, out)
+		return f.PrintObject(cmd, false, mapper, newRc, out)
 	}
 	cmdutil.PrintSuccess(mapper, false, out, "replicationcontrollers", oldName, dryrun, message)
 	return nil

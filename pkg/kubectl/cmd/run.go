@@ -19,7 +19,6 @@ package cmd
 import (
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/docker/distribution/reference"
 	"github.com/spf13/cobra"
@@ -90,9 +89,7 @@ var (
 
 func NewCmdRun(f cmdutil.Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
-		Use: "run NAME --image=image [--env=\"key=value\"] [--port=port] [--replicas=replicas] [--dry-run=bool] [--overrides=inline-json] [--command] -- [COMMAND] [args...]",
-		// run-container is deprecated
-		Aliases: []string{"run-container"},
+		Use:     "run NAME --image=image [--env=\"key=value\"] [--port=port] [--replicas=replicas] [--dry-run=bool] [--overrides=inline-json] [--command] -- [COMMAND] [args...]",
 		Short:   i18n.T("Run a particular image on the cluster"),
 		Long:    runLong,
 		Example: runExample,
@@ -140,10 +137,6 @@ func addRunFlags(cmd *cobra.Command) {
 }
 
 func Run(f cmdutil.Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer, cmd *cobra.Command, args []string, argsLenAtDash int) error {
-	if len(os.Args) > 1 && os.Args[1] == "run-container" {
-		printDeprecationWarning("run", "run-container")
-	}
-
 	// Let kubectl run follow rules for `--`, see #13004 issue
 	if len(args) == 0 || argsLenAtDash == 0 {
 		return cmdutil.UsageError(cmd, "NAME is required for run")
@@ -338,8 +331,7 @@ func Run(f cmdutil.Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer, cmd *cobr
 			if err != nil {
 				return err
 			}
-			_, typer := f.Object()
-			r := resource.NewBuilder(mapper, f.CategoryExpander(), typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
+			r := f.NewBuilder(true).
 				ContinueOnError().
 				NamespaceParam(namespace).DefaultNamespace().
 				ResourceNames(mapping.Resource, name).
@@ -386,7 +378,7 @@ func Run(f cmdutil.Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer, cmd *cobr
 
 	outputFormat := cmdutil.GetFlagString(cmd, "output")
 	if outputFormat != "" || cmdutil.GetDryRunFlag(cmd) {
-		return f.PrintObject(cmd, mapper, obj, cmdOut)
+		return f.PrintObject(cmd, false, mapper, obj, cmdOut)
 	}
 	cmdutil.PrintSuccess(mapper, false, cmdOut, mapping.Resource, args[0], cmdutil.GetDryRunFlag(cmd), "created")
 	return nil
@@ -563,7 +555,7 @@ func generateService(f cmdutil.Factory, cmd *cobra.Command, args []string, servi
 	}
 
 	if cmdutil.GetFlagString(cmd, "output") != "" || cmdutil.GetDryRunFlag(cmd) {
-		err := f.PrintObject(cmd, mapper, obj, out)
+		err := f.PrintObject(cmd, false, mapper, obj, out)
 		if err != nil {
 			return err
 		}

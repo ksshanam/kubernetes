@@ -28,6 +28,7 @@ import (
 	"github.com/emicklei/go-restful-swagger12"
 	"github.com/golang/glog"
 
+	"github.com/go-openapi/spec"
 	"k8s.io/apimachinery/pkg/apimachinery"
 	"k8s.io/apimachinery/pkg/apimachinery/registered"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,13 +38,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/audit"
 	genericapi "k8s.io/apiserver/pkg/endpoints"
 	"k8s.io/apiserver/pkg/endpoints/discovery"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/apiserver/pkg/server/healthz"
-	"k8s.io/apiserver/pkg/server/mux"
-	genericmux "k8s.io/apiserver/pkg/server/mux"
+	"k8s.io/apiserver/pkg/server/openapi"
 	"k8s.io/apiserver/pkg/server/routes"
 	restclient "k8s.io/client-go/rest"
 )
@@ -101,9 +102,6 @@ type GenericAPIServer struct {
 	// requestContextMapper provides a way to get the context for a request.  It may be nil.
 	requestContextMapper apirequest.RequestContextMapper
 
-	// The registered APIs
-	HandlerContainer *genericmux.APIContainer
-
 	SecureServingInfo *SecureServingInfo
 
 	// numerical ports, set after listening
@@ -121,10 +119,8 @@ type GenericAPIServer struct {
 	Serializer runtime.NegotiatedSerializer
 
 	// "Outputs"
-	Handler http.Handler
-	// FallThroughHandler is the final HTTP handler in the chain.
-	// It comes after all filters and the API handling
-	FallThroughHandler *mux.PathRecorderMux
+	// Handler holdes the handlers being used by this API server
+	Handler *APIServerHandler
 
 	// listedPathProvider is a lister which provides the set of paths to show at /
 	listedPathProvider routes.ListedPathProvider
@@ -135,6 +131,9 @@ type GenericAPIServer struct {
 	// Enable swagger and/or OpenAPI if these configs are non-nil.
 	swaggerConfig *swagger.Config
 	openAPIConfig *openapicommon.Config
+
+	// Enables updating OpenAPI spec using update method.
+	OpenAPIService *openapi.OpenAPIService
 
 	// PostStartHooks are each called after the server has started listening, in a separate go func for each
 	// with no guarantee of ordering between them.  The map key is a name used for error reporting.
@@ -148,6 +147,9 @@ type GenericAPIServer struct {
 	healthzLock    sync.Mutex
 	healthzChecks  []healthz.HealthzChecker
 	healthzCreated bool
+
+	// auditing. The backend is started after the server starts listening.
+	AuditBackend audit.Backend
 }
 
 // DelegationTarget is an interface which allows for composition of API servers with top level handling that works
@@ -168,10 +170,14 @@ type DelegationTarget interface {
 
 	// ListedPaths returns the paths for supporting an index
 	ListedPaths() []string
+
+	// OpenAPISpec returns the OpenAPI spec of the delegation target if exists, nil otherwise.
+	OpenAPISpec() *spec.Swagger
 }
 
 func (s *GenericAPIServer) UnprotectedHandler() http.Handler {
-	return s.HandlerContainer.ServeMux
+	// when we delegate, we need the server we're delegating to choose whether or not to use gorestful
+	return s.Handler.Director
 }
 func (s *GenericAPIServer) PostStartHooks() map[string]postStartHookEntry {
 	return s.postStartHooks
@@ -181,6 +187,9 @@ func (s *GenericAPIServer) HealthzChecks() []healthz.HealthzChecker {
 }
 func (s *GenericAPIServer) ListedPaths() []string {
 	return s.listedPathProvider.ListedPaths()
+}
+func (s *GenericAPIServer) OpenAPISpec() *spec.Swagger {
+	return s.OpenAPIService.GetSpec()
 }
 
 var EmptyDelegate = emptyDelegate{
@@ -205,6 +214,9 @@ func (s emptyDelegate) ListedPaths() []string {
 }
 func (s emptyDelegate) RequestContextMapper() apirequest.RequestContextMapper {
 	return s.requestContextMapper
+}
+func (s emptyDelegate) OpenAPISpec() *spec.Swagger {
+	return nil
 }
 
 func init() {
@@ -233,21 +245,26 @@ type preparedGenericAPIServer struct {
 // PrepareRun does post API installation setup steps.
 func (s *GenericAPIServer) PrepareRun() preparedGenericAPIServer {
 	if s.swaggerConfig != nil {
-		routes.Swagger{Config: s.swaggerConfig}.Install(s.HandlerContainer)
+		routes.Swagger{Config: s.swaggerConfig}.Install(s.Handler.GoRestfulContainer)
 	}
-	if s.openAPIConfig != nil {
-		routes.OpenAPI{
-			Config: s.openAPIConfig,
-		}.Install(s.HandlerContainer, s.FallThroughHandler)
-	}
+	s.PrepareOpenAPIService()
 
 	s.installHealthz()
 
 	return preparedGenericAPIServer{s}
 }
 
-// Run spawns the http servers (secure and insecure). It only returns if stopCh is closed
-// or one of the ports cannot be listened on initially.
+// PrepareOpenAPIService installs OpenAPI handler if it does not exists.
+func (s *GenericAPIServer) PrepareOpenAPIService() {
+	if s.openAPIConfig != nil && s.OpenAPIService == nil {
+		s.OpenAPIService = routes.OpenAPI{
+			Config: s.openAPIConfig,
+		}.Install(s.Handler.GoRestfulContainer, s.Handler.NonGoRestfulMux)
+	}
+}
+
+// Run spawns the secure http server. It only returns if stopCh is closed
+// or the secure port cannot be listened on initially.
 func (s preparedGenericAPIServer) Run(stopCh <-chan struct{}) error {
 	err := s.NonBlockingRun(stopCh)
 	if err != nil {
@@ -258,8 +275,8 @@ func (s preparedGenericAPIServer) Run(stopCh <-chan struct{}) error {
 	return nil
 }
 
-// NonBlockingRun spawns the http servers (secure and insecure). An error is
-// returned if either of the ports cannot be listened on.
+// NonBlockingRun spawns the secure http server. An error is
+// returned if the secure port cannot be listened on.
 func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) error {
 	// Use an internal stop channel to allow cleanup of the listeners on error.
 	internalStopCh := make(chan struct{})
@@ -271,7 +288,7 @@ func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) error {
 		}
 	}
 
-	// Now that both listeners have bound successfully, it is the
+	// Now that listener have bound successfully, it is the
 	// responsibility of the caller to close the provided channel to
 	// ensure cleanup.
 	go func() {
@@ -279,7 +296,15 @@ func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) error {
 		close(internalStopCh)
 	}()
 
-	s.RunPostStartHooks()
+	// Start the audit backend before any request comes in. This means we cannot turn it into a
+	// post start hook because without calling Backend.Run the Backend.ProcessEvents call might block.
+	if s.AuditBackend != nil {
+		if err := s.AuditBackend.Run(stopCh); err != nil {
+			return fmt.Errorf("failed to run the audit backend: %v", err)
+		}
+	}
+
+	s.RunPostStartHooks(stopCh)
 
 	if _, err := systemd.SdNotify(true, "READY=1\n"); err != nil {
 		glog.Errorf("Unable to send systemd daemon successful start message: %v\n", err)
@@ -306,7 +331,7 @@ func (s *GenericAPIServer) installAPIResources(apiPrefix string, apiGroupInfo *A
 			apiGroupVersion.OptionsExternalVersion = apiGroupInfo.OptionsExternalVersion
 		}
 
-		if err := apiGroupVersion.InstallREST(s.HandlerContainer.Container); err != nil {
+		if err := apiGroupVersion.InstallREST(s.Handler.GoRestfulContainer); err != nil {
 			return fmt.Errorf("Unable to setup API %v: %v", apiGroupInfo, err)
 		}
 	}
@@ -329,7 +354,7 @@ func (s *GenericAPIServer) InstallLegacyAPIGroup(apiPrefix string, apiGroupInfo 
 	}
 	// Install the version handler.
 	// Add a handler at /<apiPrefix> to enumerate the supported api versions.
-	s.HandlerContainer.Add(discovery.NewLegacyRootAPIHandler(s.discoveryAddresses, s.Serializer, apiPrefix, apiVersions).WebService())
+	s.Handler.GoRestfulContainer.Add(discovery.NewLegacyRootAPIHandler(s.discoveryAddresses, s.Serializer, apiPrefix, apiVersions, s.requestContextMapper).WebService())
 	return nil
 }
 
@@ -362,18 +387,18 @@ func (s *GenericAPIServer) InstallAPIGroup(apiGroupInfo *APIGroupInfo) error {
 			Version:      groupVersion.Version,
 		})
 	}
-	preferedVersionForDiscovery := metav1.GroupVersionForDiscovery{
+	preferredVersionForDiscovery := metav1.GroupVersionForDiscovery{
 		GroupVersion: apiGroupInfo.GroupMeta.GroupVersion.String(),
 		Version:      apiGroupInfo.GroupMeta.GroupVersion.Version,
 	}
 	apiGroup := metav1.APIGroup{
 		Name:             apiGroupInfo.GroupMeta.GroupVersion.Group,
 		Versions:         apiVersionsForDiscovery,
-		PreferredVersion: preferedVersionForDiscovery,
+		PreferredVersion: preferredVersionForDiscovery,
 	}
 
 	s.DiscoveryGroupManager.AddGroup(apiGroup)
-	s.HandlerContainer.Add(discovery.NewAPIGroupHandler(s.Serializer, apiGroup).WebService())
+	s.Handler.GoRestfulContainer.Add(discovery.NewAPIGroupHandler(s.Serializer, apiGroup, s.requestContextMapper).WebService())
 
 	return nil
 }

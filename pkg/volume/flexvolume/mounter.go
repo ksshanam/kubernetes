@@ -19,7 +19,6 @@ package flexvolume
 import (
 	"strconv"
 
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume"
@@ -44,12 +43,12 @@ var _ volume.Mounter = &flexVolumeMounter{}
 // Mounter interface
 
 // SetUp creates new directory.
-func (f *flexVolumeMounter) SetUp(fsGroup *types.UnixGroupID) error {
+func (f *flexVolumeMounter) SetUp(fsGroup *int64) error {
 	return f.SetUpAt(f.GetPath(), fsGroup)
 }
 
 // SetUpAt creates new directory.
-func (f *flexVolumeMounter) SetUpAt(dir string, fsGroup *types.UnixGroupID) error {
+func (f *flexVolumeMounter) SetUpAt(dir string, fsGroup *int64) error {
 	// Mount only once.
 	alreadyMounted, err := prepareForMount(f.mounter, dir)
 	if err != nil {
@@ -65,6 +64,13 @@ func (f *flexVolumeMounter) SetUpAt(dir string, fsGroup *types.UnixGroupID) erro
 	call.Append(dir)
 
 	extraOptions := make(map[string]string)
+
+	// pod metadata
+	extraOptions[optionKeyPodName] = f.podName
+	extraOptions[optionKeyPodNamespace] = f.podNamespace
+	extraOptions[optionKeyPodUID] = string(f.podUID)
+	// service account metadata
+	extraOptions[optionKeyServiceAccountName] = f.podServiceAccountName
 
 	// Extract secret and pass it as options.
 	if err := addSecretsToOptions(extraOptions, f.spec, f.podNamespace, f.driverName, f.plugin.host); err != nil {

@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -40,7 +39,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/annotations"
 	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
@@ -132,6 +130,7 @@ func NewCmdApply(f cmdutil.Factory, out, errOut io.Writer) *cobra.Command {
 	// apply subcommands
 	cmd.AddCommand(NewCmdApplyViewLastApplied(f, out, errOut))
 	cmd.AddCommand(NewCmdApplySetLastApplied(f, out, errOut))
+	cmd.AddCommand(NewCmdApplyEditLastApplied(f, out, errOut))
 
 	return cmd
 }
@@ -193,7 +192,7 @@ func RunApply(f cmdutil.Factory, cmd *cobra.Command, out, errOut io.Writer, opti
 		return err
 	}
 
-	mapper, typer, err := f.UnstructuredObject()
+	mapper, _, err := f.UnstructuredObject()
 	if err != nil {
 		return err
 	}
@@ -205,7 +204,12 @@ func RunApply(f cmdutil.Factory, cmd *cobra.Command, out, errOut io.Writer, opti
 		}
 	}
 
-	r := resource.NewBuilder(mapper, f.CategoryExpander(), typer, resource.ClientMapperFunc(f.UnstructuredClientForMapping), unstructured.UnstructuredJSONScheme).
+	builder, err := f.NewUnstructuredBuilder(true)
+	if err != nil {
+		return err
+	}
+
+	r := builder.
 		Schema(schema).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
@@ -240,6 +244,17 @@ func RunApply(f cmdutil.Factory, cmd *cobra.Command, out, errOut io.Writer, opti
 			visitedNamespaces.Insert(info.Namespace)
 		}
 
+		// Add change-cause annotation to resource info if it should be recorded
+		if cmdutil.ShouldRecord(cmd, info) {
+			recordInObj := info.VersionedObject
+			if info.VersionedObject == nil {
+				recordInObj = info.Object
+			}
+			if err := cmdutil.RecordChangeCause(recordInObj, f.Command(cmd, false)); err != nil {
+				glog.V(4).Infof("error recording current command: %v", err)
+			}
+		}
+
 		// Get the modified configuration of the object. Embed the result
 		// as an annotation in the modified configuration, so that it will appear
 		// in the patch sent to the server.
@@ -256,12 +271,6 @@ func RunApply(f cmdutil.Factory, cmd *cobra.Command, out, errOut io.Writer, opti
 			// First, update the annotation used by kubectl apply
 			if err := kubectl.CreateApplyAnnotation(info, encoder); err != nil {
 				return cmdutil.AddSourceToErr("creating", info.Source, err)
-			}
-
-			if cmdutil.ShouldRecord(cmd, info) {
-				if err := cmdutil.RecordChangeCause(info.Object, f.Command(cmd, false)); err != nil {
-					return cmdutil.AddSourceToErr("creating", info.Source, err)
-				}
 			}
 
 			if !dryRun {
@@ -289,7 +298,7 @@ func RunApply(f cmdutil.Factory, cmd *cobra.Command, out, errOut io.Writer, opti
 			if err != nil {
 				return err
 			}
-			if _, ok := annotationMap[annotations.LastAppliedConfigAnnotation]; !ok {
+			if _, ok := annotationMap[api.LastAppliedConfigAnnotation]; !ok {
 				fmt.Fprintf(errOut, warningNoLastAppliedConfigAnnotation)
 			}
 			overwrite := cmdutil.GetFlagBool(cmd, "overwrite")
@@ -311,16 +320,6 @@ func RunApply(f cmdutil.Factory, cmd *cobra.Command, out, errOut io.Writer, opti
 			patchBytes, patchedObject, err := patcher.patch(info.Object, modified, info.Source, info.Namespace, info.Name)
 			if err != nil {
 				return cmdutil.AddSourceToErr(fmt.Sprintf("applying patch:\n%s\nto:\n%v\nfor:", patchBytes, info), info.Source, err)
-			}
-
-			if cmdutil.ShouldRecord(cmd, info) {
-				if patch, patchType, err := cmdutil.ChangeResourcePatch(info, f.Command(cmd, true)); err == nil {
-					if recordedObject, err := helper.Patch(info.Namespace, info.Name, patchType, patch); err != nil {
-						glog.V(4).Infof("error recording reason: %v", err)
-					} else {
-						patchedObject = recordedObject
-					}
-				}
 			}
 
 			info.Refresh(patchedObject, true)
@@ -475,7 +474,7 @@ func (p *pruner) prune(namespace string, mapping *meta.RESTMapping, shortOutput 
 		if err != nil {
 			return err
 		}
-		if _, ok := annots[annotations.LastAppliedConfigAnnotation]; !ok {
+		if _, ok := annots[api.LastAppliedConfigAnnotation]; !ok {
 			// don't prune resources not created with apply
 			continue
 		}

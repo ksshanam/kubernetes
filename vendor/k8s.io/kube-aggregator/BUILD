@@ -7,6 +7,7 @@ load(
     "go_binary",
     "go_library",
 )
+load("//vendor/k8s.io/client-go/pkg/version:def.bzl", "version_x_defs")
 
 go_binary(
     name = "kube-aggregator",
@@ -17,8 +18,8 @@ go_binary(
         "-static",
     ],
     library = ":go_default_library",
-    linkstamp = "k8s.io/kubernetes/pkg/version",
     tags = ["automanaged"],
+    x_defs = version_x_defs(),
 )
 
 go_library(
@@ -32,7 +33,7 @@ go_library(
         "//vendor/k8s.io/kube-aggregator/pkg/apis/apiregistration/validation:go_default_library",
         "//vendor/k8s.io/kube-aggregator/pkg/client/clientset_generated/internalclientset:go_default_library",
         "//vendor/k8s.io/kube-aggregator/pkg/client/listers/apiregistration/internalversion:go_default_library",
-        "//vendor/k8s.io/kube-aggregator/pkg/client/listers/apiregistration/v1alpha1:go_default_library",
+        "//vendor/k8s.io/kube-aggregator/pkg/client/listers/apiregistration/v1beta1:go_default_library",
         "//vendor/k8s.io/kube-aggregator/pkg/cmd/server:go_default_library",
     ],
 )

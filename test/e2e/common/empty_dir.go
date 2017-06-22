@@ -27,12 +27,12 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 
 	. "github.com/onsi/ginkgo"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
 	testImageRootUid    = "gcr.io/google_containers/mounttest:0.8"
 	testImageNonRootUid = "gcr.io/google_containers/mounttest-user:0.5"
+	volumePath          = "/test-volume"
 )
 
 var _ = framework.KubeDescribe("EmptyDir volumes", func() {
@@ -46,6 +46,10 @@ var _ = framework.KubeDescribe("EmptyDir volumes", func() {
 
 		It("new files should be created with FSGroup ownership when container is non-root [Volume]", func() {
 			doTestSetgidFSGroup(f, testImageNonRootUid, v1.StorageMediumMemory)
+		})
+
+		It("nonexistent volume subPath should have the correct mode and owner using FSGroup [Volume]", func() {
+			doTestSubPathFSGroup(f, testImageNonRootUid, v1.StorageMediumMemory)
 		})
 
 		It("files with FSGroup ownership should support (root,0644,tmpfs) [Volume]", func() {
@@ -125,10 +129,9 @@ const (
 
 func doTestSetgidFSGroup(f *framework.Framework, image string, medium v1.StorageMedium) {
 	var (
-		volumePath = "/test-volume"
-		filePath   = path.Join(volumePath, "test-file")
-		source     = &v1.EmptyDirVolumeSource{Medium: medium}
-		pod        = testPodWithVolume(testImageRootUid, volumePath, source)
+		filePath = path.Join(volumePath, "test-file")
+		source   = &v1.EmptyDirVolumeSource{Medium: medium}
+		pod      = testPodWithVolume(testImageRootUid, volumePath, source)
 	)
 
 	pod.Spec.Containers[0].Args = []string{
@@ -138,7 +141,7 @@ func doTestSetgidFSGroup(f *framework.Framework, image string, medium v1.Storage
 		fmt.Sprintf("--file_owner=%v", filePath),
 	}
 
-	fsGroup := types.UnixGroupID(123)
+	fsGroup := int64(123)
 	pod.Spec.SecurityContext.FSGroup = &fsGroup
 
 	msg := fmt.Sprintf("emptydir 0644 on %v", formatMedium(medium))
@@ -153,11 +156,40 @@ func doTestSetgidFSGroup(f *framework.Framework, image string, medium v1.Storage
 	f.TestContainerOutput(msg, pod, 0, out)
 }
 
+func doTestSubPathFSGroup(f *framework.Framework, image string, medium v1.StorageMedium) {
+	var (
+		subPath = "test-sub"
+		source  = &v1.EmptyDirVolumeSource{Medium: medium}
+		pod     = testPodWithVolume(image, volumePath, source)
+	)
+
+	pod.Spec.Containers[0].Args = []string{
+		fmt.Sprintf("--fs_type=%v", volumePath),
+		fmt.Sprintf("--file_perm=%v", volumePath),
+		fmt.Sprintf("--file_owner=%v", volumePath),
+	}
+
+	pod.Spec.Containers[0].VolumeMounts[0].SubPath = subPath
+
+	fsGroup := int64(123)
+	pod.Spec.SecurityContext.FSGroup = &fsGroup
+
+	msg := fmt.Sprintf("emptydir subpath on %v", formatMedium(medium))
+	out := []string{
+		"perms of file \"/test-volume\": -rwxrwxrwx",
+		"owner UID of \"/test-volume\": 0",
+		"owner GID of \"/test-volume\": 123",
+	}
+	if medium == v1.StorageMediumMemory {
+		out = append(out, "mount type of \"/test-volume\": tmpfs")
+	}
+	f.TestContainerOutput(msg, pod, 0, out)
+}
+
 func doTestVolumeModeFSGroup(f *framework.Framework, image string, medium v1.StorageMedium) {
 	var (
-		volumePath = "/test-volume"
-		source     = &v1.EmptyDirVolumeSource{Medium: medium}
-		pod        = testPodWithVolume(testImageRootUid, volumePath, source)
+		source = &v1.EmptyDirVolumeSource{Medium: medium}
+		pod    = testPodWithVolume(testImageRootUid, volumePath, source)
 	)
 
 	pod.Spec.Containers[0].Args = []string{
@@ -165,7 +197,7 @@ func doTestVolumeModeFSGroup(f *framework.Framework, image string, medium v1.Sto
 		fmt.Sprintf("--file_perm=%v", volumePath),
 	}
 
-	fsGroup := types.UnixGroupID(1001)
+	fsGroup := int64(1001)
 	pod.Spec.SecurityContext.FSGroup = &fsGroup
 
 	msg := fmt.Sprintf("emptydir volume type on %v", formatMedium(medium))
@@ -180,10 +212,9 @@ func doTestVolumeModeFSGroup(f *framework.Framework, image string, medium v1.Sto
 
 func doTest0644FSGroup(f *framework.Framework, image string, medium v1.StorageMedium) {
 	var (
-		volumePath = "/test-volume"
-		filePath   = path.Join(volumePath, "test-file")
-		source     = &v1.EmptyDirVolumeSource{Medium: medium}
-		pod        = testPodWithVolume(image, volumePath, source)
+		filePath = path.Join(volumePath, "test-file")
+		source   = &v1.EmptyDirVolumeSource{Medium: medium}
+		pod      = testPodWithVolume(image, volumePath, source)
 	)
 
 	pod.Spec.Containers[0].Args = []string{
@@ -192,7 +223,7 @@ func doTest0644FSGroup(f *framework.Framework, image string, medium v1.StorageMe
 		fmt.Sprintf("--file_perm=%v", filePath),
 	}
 
-	fsGroup := types.UnixGroupID(123)
+	fsGroup := int64(123)
 	pod.Spec.SecurityContext.FSGroup = &fsGroup
 
 	msg := fmt.Sprintf("emptydir 0644 on %v", formatMedium(medium))
@@ -208,9 +239,8 @@ func doTest0644FSGroup(f *framework.Framework, image string, medium v1.StorageMe
 
 func doTestVolumeMode(f *framework.Framework, image string, medium v1.StorageMedium) {
 	var (
-		volumePath = "/test-volume"
-		source     = &v1.EmptyDirVolumeSource{Medium: medium}
-		pod        = testPodWithVolume(testImageRootUid, volumePath, source)
+		source = &v1.EmptyDirVolumeSource{Medium: medium}
+		pod    = testPodWithVolume(testImageRootUid, volumePath, source)
 	)
 
 	pod.Spec.Containers[0].Args = []string{
@@ -230,10 +260,9 @@ func doTestVolumeMode(f *framework.Framework, image string, medium v1.StorageMed
 
 func doTest0644(f *framework.Framework, image string, medium v1.StorageMedium) {
 	var (
-		volumePath = "/test-volume"
-		filePath   = path.Join(volumePath, "test-file")
-		source     = &v1.EmptyDirVolumeSource{Medium: medium}
-		pod        = testPodWithVolume(image, volumePath, source)
+		filePath = path.Join(volumePath, "test-file")
+		source   = &v1.EmptyDirVolumeSource{Medium: medium}
+		pod      = testPodWithVolume(image, volumePath, source)
 	)
 
 	pod.Spec.Containers[0].Args = []string{
@@ -255,10 +284,9 @@ func doTest0644(f *framework.Framework, image string, medium v1.StorageMedium) {
 
 func doTest0666(f *framework.Framework, image string, medium v1.StorageMedium) {
 	var (
-		volumePath = "/test-volume"
-		filePath   = path.Join(volumePath, "test-file")
-		source     = &v1.EmptyDirVolumeSource{Medium: medium}
-		pod        = testPodWithVolume(image, volumePath, source)
+		filePath = path.Join(volumePath, "test-file")
+		source   = &v1.EmptyDirVolumeSource{Medium: medium}
+		pod      = testPodWithVolume(image, volumePath, source)
 	)
 
 	pod.Spec.Containers[0].Args = []string{
@@ -280,10 +308,9 @@ func doTest0666(f *framework.Framework, image string, medium v1.StorageMedium) {
 
 func doTest0777(f *framework.Framework, image string, medium v1.StorageMedium) {
 	var (
-		volumePath = "/test-volume"
-		filePath   = path.Join(volumePath, "test-file")
-		source     = &v1.EmptyDirVolumeSource{Medium: medium}
-		pod        = testPodWithVolume(image, volumePath, source)
+		filePath = path.Join(volumePath, "test-file")
+		source   = &v1.EmptyDirVolumeSource{Medium: medium}
+		pod      = testPodWithVolume(image, volumePath, source)
 	)
 
 	pod.Spec.Containers[0].Args = []string{

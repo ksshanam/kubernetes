@@ -284,8 +284,9 @@ def set_app_version():
     hookenv.application_version_set(version.split(b' v')[-1].rstrip())
 
 
-@when('cdk-addons.configured')
-def idle_status():
+@when('cdk-addons.configured', 'kube-api-endpoint.available',
+      'kube-control.connected')
+def idle_status(kube_api, kube_control):
     ''' Signal at the end of the run that we are running. '''
     if not all_kube_system_pods_running():
         hookenv.status_set('waiting', 'Waiting for kube-system pods to start')
@@ -439,7 +440,6 @@ def addons_ready():
     except CalledProcessError:
         hookenv.log("Addons are not ready yet.")
         return False
-
 
 
 @when('loadbalancer.available', 'certificates.ca.available',
@@ -792,6 +792,7 @@ def configure_master_services():
     api_opts.add('insecure-port', '8080')
     api_opts.add('storage-backend', 'etcd2')  # FIXME: add etcd3 support
     admission_control = [
+        'Initializers',
         'NamespaceLifecycle',
         'LimitRanger',
         'ServiceAccount',
@@ -802,6 +803,9 @@ def configure_master_services():
     if get_version('kube-apiserver') < (1, 6):
         hookenv.log('Removing DefaultTolerationSeconds from admission-control')
         admission_control.remove('DefaultTolerationSeconds')
+    if get_version('kube-apiserver') < (1, 7):
+        hookenv.log('Removing Initializers from admission-control')
+        admission_control.remove('Initializers')
     api_opts.add('admission-control', ','.join(admission_control), strict=True)
 
     # Default to 3 minute resync. TODO: Make this configureable?
