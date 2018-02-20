@@ -31,7 +31,7 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/util/i18n"
+	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 )
 
 type createAuthInfoOptions struct {
@@ -100,7 +100,8 @@ func NewCmdConfigSetAuthInfo(out io.Writer, configAccess clientcmd.ConfigAccess)
 
 func newCmdConfigSetAuthInfo(out io.Writer, options *createAuthInfoOptions) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     fmt.Sprintf("set-credentials NAME [--%v=path/to/certfile] [--%v=path/to/keyfile] [--%v=bearer_token] [--%v=basic_user] [--%v=basic_password] [--%v=provider_name] [--%v=key=value]", clientcmd.FlagCertFile, clientcmd.FlagKeyFile, clientcmd.FlagBearerToken, clientcmd.FlagUsername, clientcmd.FlagPassword, flagAuthProvider, flagAuthProviderArg),
+		Use: fmt.Sprintf("set-credentials NAME [--%v=path/to/certfile] [--%v=path/to/keyfile] [--%v=bearer_token] [--%v=basic_user] [--%v=basic_password] [--%v=provider_name] [--%v=key=value]", clientcmd.FlagCertFile, clientcmd.FlagKeyFile, clientcmd.FlagBearerToken, clientcmd.FlagUsername, clientcmd.FlagPassword, flagAuthProvider, flagAuthProviderArg),
+		DisableFlagsInUseLine: true,
 		Short:   i18n.T("Sets a user entry in kubeconfig"),
 		Long:    create_authinfo_long,
 		Example: create_authinfo_example,
@@ -115,16 +116,16 @@ func newCmdConfigSetAuthInfo(out io.Writer, options *createAuthInfoOptions) *cob
 		},
 	}
 
-	cmd.Flags().Var(&options.clientCertificate, clientcmd.FlagCertFile, "path to "+clientcmd.FlagCertFile+" file for the user entry in kubeconfig")
+	cmd.Flags().Var(&options.clientCertificate, clientcmd.FlagCertFile, "Path to "+clientcmd.FlagCertFile+" file for the user entry in kubeconfig")
 	cmd.MarkFlagFilename(clientcmd.FlagCertFile)
-	cmd.Flags().Var(&options.clientKey, clientcmd.FlagKeyFile, "path to "+clientcmd.FlagKeyFile+" file for the user entry in kubeconfig")
+	cmd.Flags().Var(&options.clientKey, clientcmd.FlagKeyFile, "Path to "+clientcmd.FlagKeyFile+" file for the user entry in kubeconfig")
 	cmd.MarkFlagFilename(clientcmd.FlagKeyFile)
 	cmd.Flags().Var(&options.token, clientcmd.FlagBearerToken, clientcmd.FlagBearerToken+" for the user entry in kubeconfig")
 	cmd.Flags().Var(&options.username, clientcmd.FlagUsername, clientcmd.FlagUsername+" for the user entry in kubeconfig")
 	cmd.Flags().Var(&options.password, clientcmd.FlagPassword, clientcmd.FlagPassword+" for the user entry in kubeconfig")
-	cmd.Flags().Var(&options.authProvider, flagAuthProvider, "auth provider for the user entry in kubeconfig")
+	cmd.Flags().Var(&options.authProvider, flagAuthProvider, "Auth provider for the user entry in kubeconfig")
 	cmd.Flags().StringSlice(flagAuthProviderArg, nil, "'key=value' arguments for the auth provider")
-	f := cmd.Flags().VarPF(&options.embedCertData, clientcmd.FlagEmbedCerts, "", "embed client cert/key for the user entry in kubeconfig")
+	f := cmd.Flags().VarPF(&options.embedCertData, clientcmd.FlagEmbedCerts, "", "Embed client cert/key for the user entry in kubeconfig")
 	f.NoOptDefVal = "true"
 
 	return cmd

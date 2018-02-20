@@ -27,6 +27,8 @@ type (
 	RestartPolicy    string
 )
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
 // Pod is a collection of containers, used as either input (create, update) or as output (list, get).
 type Pod struct {
 	metav1.TypeMeta `json:",inline"`
@@ -134,7 +136,7 @@ type PodSpec struct {
 	NodeSelector map[string]string `json:"nodeSelector,omitempty" protobuf:"bytes,7,rep,name=nodeSelector"`
 
 	// ServiceAccountName is the name of the ServiceAccount to use to run this pod.
-	// More info: http://releases.k8s.io/HEAD/docs/design/service_accounts.md
+	// More info: https://git.k8s.io/community/contributors/design-proposals/auth/service_accounts.md
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty" protobuf:"bytes,8,opt,name=serviceAccountName"`
 	// DeprecatedServiceAccount is a depreciated alias for ServiceAccountName.
@@ -177,6 +179,8 @@ type PodSpec struct {
 	// +optional
 	SchedulerName string `json:"schedulername,omitempty" protobuf:"bytes,19,opt,name=schedulername"`
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // PodList is a list of Pods.
 type PodList struct {

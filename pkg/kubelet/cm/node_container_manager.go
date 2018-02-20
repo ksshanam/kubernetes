@@ -25,13 +25,14 @@ import (
 
 	"github.com/golang/glog"
 
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
-	clientv1 "k8s.io/client-go/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/kubelet/cadvisor"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	kubefeatures "k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/events"
 	evictionapi "k8s.io/kubernetes/pkg/kubelet/eviction/api"
+	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
 )
 
 const (
@@ -54,7 +55,7 @@ func (cm *containerManagerImpl) createNodeAllocatableCgroups() error {
 	return nil
 }
 
-// Enforce Node Allocatable Cgroup settings.
+// enforceNodeAllocatableCgroups enforce Node Allocatable Cgroup settings.
 func (cm *containerManagerImpl) enforceNodeAllocatableCgroups() error {
 	nc := cm.NodeConfig.NodeAllocatableConfig
 
@@ -62,7 +63,7 @@ func (cm *containerManagerImpl) enforceNodeAllocatableCgroups() error {
 	// default cpu shares on cgroups are low and can cause cpu starvation.
 	nodeAllocatable := cm.capacity
 	// Use Node Allocatable limits instead of capacity if the user requested enforcing node allocatable.
-	if cm.CgroupsPerQOS && nc.EnforceNodeAllocatable.Has(NodeAllocatableEnforcementKey) {
+	if cm.CgroupsPerQOS && nc.EnforceNodeAllocatable.Has(kubetypes.NodeAllocatableEnforcementKey) {
 		nodeAllocatable = cm.getNodeAllocatableAbsolute()
 	}
 
@@ -74,7 +75,7 @@ func (cm *containerManagerImpl) enforceNodeAllocatableCgroups() error {
 	}
 
 	// Using ObjectReference for events as the node maybe not cached; refer to #42701 for detail.
-	nodeRef := &clientv1.ObjectReference{
+	nodeRef := &v1.ObjectReference{
 		Kind:      "Node",
 		Name:      cm.nodeInfo.Name,
 		UID:       types.UID(cm.nodeInfo.Name),
@@ -101,7 +102,7 @@ func (cm *containerManagerImpl) enforceNodeAllocatableCgroups() error {
 		}()
 	}
 	// Now apply kube reserved and system reserved limits if required.
-	if nc.EnforceNodeAllocatable.Has(SystemReservedEnforcementKey) {
+	if nc.EnforceNodeAllocatable.Has(kubetypes.SystemReservedEnforcementKey) {
 		glog.V(2).Infof("Enforcing System reserved on cgroup %q with limits: %+v", nc.SystemReservedCgroupName, nc.SystemReserved)
 		if err := enforceExistingCgroup(cm.cgroupManager, nc.SystemReservedCgroupName, nc.SystemReserved); err != nil {
 			message := fmt.Sprintf("Failed to enforce System Reserved Cgroup Limits on %q: %v", nc.SystemReservedCgroupName, err)
@@ -110,7 +111,7 @@ func (cm *containerManagerImpl) enforceNodeAllocatableCgroups() error {
 		}
 		cm.recorder.Eventf(nodeRef, v1.EventTypeNormal, events.SuccessfulNodeAllocatableEnforcement, "Updated limits on system reserved cgroup %v", nc.SystemReservedCgroupName)
 	}
-	if nc.EnforceNodeAllocatable.Has(KubeReservedEnforcementKey) {
+	if nc.EnforceNodeAllocatable.Has(kubetypes.KubeReservedEnforcementKey) {
 		glog.V(2).Infof("Enforcing kube reserved on cgroup %q with limits: %+v", nc.KubeReservedCgroupName, nc.KubeReserved)
 		if err := enforceExistingCgroup(cm.cgroupManager, nc.KubeReservedCgroupName, nc.KubeReserved); err != nil {
 			message := fmt.Sprintf("Failed to enforce Kube Reserved Cgroup Limits on %q: %v", nc.KubeReservedCgroupName, err)
@@ -138,7 +139,7 @@ func enforceExistingCgroup(cgroupManager CgroupManager, cName string, rl v1.Reso
 	return nil
 }
 
-// Returns a ResourceConfig object that can be used to create or update cgroups via CgroupManager interface.
+// getCgroupConfig returns a ResourceConfig object that can be used to create or update cgroups via CgroupManager interface.
 func getCgroupConfig(rl v1.ResourceList) *ResourceConfig {
 	// TODO(vishh): Set CPU Quota if necessary.
 	if rl == nil {
@@ -155,6 +156,10 @@ func getCgroupConfig(rl v1.ResourceList) *ResourceConfig {
 		val := MilliCPUToShares(q.MilliValue())
 		rc.CpuShares = &val
 	}
+	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.HugePages) {
+		rc.HugePageLimit = HugePageLimits(rl)
+	}
+
 	return &rc
 }
 
@@ -181,20 +186,9 @@ func (cm *containerManagerImpl) getNodeAllocatableAbsolute() v1.ResourceList {
 
 }
 
-// GetNodeAllocatable returns amount of compute or storage resource that have to be reserved on this node from scheduling.
+// GetNodeAllocatableReservation returns amount of compute or storage resource that have to be reserved on this node from scheduling.
 func (cm *containerManagerImpl) GetNodeAllocatableReservation() v1.ResourceList {
 	evictionReservation := hardEvictionReservation(cm.HardEvictionThresholds, cm.capacity)
-	if _, ok := cm.capacity[v1.ResourceStorage]; !ok {
-		if cm.cadvisorInterface != nil {
-			if rootfs, err := cm.cadvisorInterface.RootFsInfo(); err == nil {
-				for rName, rCap := range cadvisor.StorageScratchCapacityFromFsInfo(rootfs) {
-					cm.capacity[rName] = rCap
-				}
-			} else {
-				glog.Warning("Error getting rootfs info: %v", err)
-			}
-		}
-	}
 	result := make(v1.ResourceList)
 	for k := range cm.capacity {
 		value := resource.NewQuantity(0, resource.DecimalSI)
@@ -229,6 +223,10 @@ func hardEvictionReservation(thresholds []evictionapi.Threshold, capacity v1.Res
 			memoryCapacity := capacity[v1.ResourceMemory]
 			value := evictionapi.GetThresholdQuantity(threshold.Value, &memoryCapacity)
 			ret[v1.ResourceMemory] = *value
+		case evictionapi.SignalNodeFsAvailable:
+			storageCapacity := capacity[v1.ResourceEphemeralStorage]
+			value := evictionapi.GetThresholdQuantity(threshold.Value, &storageCapacity)
+			ret[v1.ResourceEphemeralStorage] = *value
 		}
 	}
 	return ret
@@ -237,14 +235,17 @@ func hardEvictionReservation(thresholds []evictionapi.Threshold, capacity v1.Res
 // validateNodeAllocatable ensures that the user specified Node Allocatable Configuration doesn't reserve more than the node capacity.
 // Returns error if the configuration is invalid, nil otherwise.
 func (cm *containerManagerImpl) validateNodeAllocatable() error {
-	na := cm.GetNodeAllocatableReservation()
-	zeroValue := resource.MustParse("0")
 	var errors []string
-	for key, val := range na {
-		if val.Cmp(zeroValue) <= 0 {
-			errors = append(errors, fmt.Sprintf("Resource %q has an allocatable of %v", key, val))
+	nar := cm.GetNodeAllocatableReservation()
+	for k, v := range nar {
+		value := cm.capacity[k].DeepCopy()
+		value.Sub(v)
+
+		if value.Sign() < 0 {
+			errors = append(errors, fmt.Sprintf("Resource %q has an allocatable of %v, capacity of %v", k, v, value))
 		}
 	}
+
 	if len(errors) > 0 {
 		return fmt.Errorf("Invalid Node Allocatable configuration. %s", strings.Join(errors, " "))
 	}

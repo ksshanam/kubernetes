@@ -23,6 +23,9 @@ import (
 	"sync"
 	"time"
 
+	batch "k8s.io/api/batch/v1"
+	"k8s.io/api/core/v1"
+	extensions "k8s.io/api/extensions/v1beta1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -34,14 +37,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
+	clientset "k8s.io/client-go/kubernetes"
+	scaleclient "k8s.io/client-go/scale"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/v1"
 	batchinternal "k8s.io/kubernetes/pkg/apis/batch"
-	batch "k8s.io/kubernetes/pkg/apis/batch/v1"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	extensionsinternal "k8s.io/kubernetes/pkg/apis/extensions"
-	extensions "k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
 	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 
 	"github.com/golang/glog"
@@ -61,7 +62,7 @@ func removePtr(replicas *int32) int32 {
 
 func WaitUntilPodIsScheduled(c clientset.Interface, name, namespace string, timeout time.Duration) (*v1.Pod, error) {
 	// Wait until it's scheduled
-	p, err := c.Core().Pods(namespace).Get(name, metav1.GetOptions{ResourceVersion: "0"})
+	p, err := c.CoreV1().Pods(namespace).Get(name, metav1.GetOptions{ResourceVersion: "0"})
 	if err == nil && p.Spec.NodeName != "" {
 		return p, nil
 	}
@@ -69,7 +70,7 @@ func WaitUntilPodIsScheduled(c clientset.Interface, name, namespace string, time
 	startTime := time.Now()
 	for startTime.Add(timeout).After(time.Now()) {
 		time.Sleep(pollingPeriod)
-		p, err := c.Core().Pods(namespace).Get(name, metav1.GetOptions{ResourceVersion: "0"})
+		p, err := c.CoreV1().Pods(namespace).Get(name, metav1.GetOptions{ResourceVersion: "0"})
 		if err == nil && p.Spec.NodeName != "" {
 			return p, nil
 		}
@@ -83,7 +84,7 @@ func RunPodAndGetNodeName(c clientset.Interface, pod *v1.Pod, timeout time.Durat
 	var err error
 	// Create a Pod
 	for i := 0; i < retries; i++ {
-		_, err = c.Core().Pods(namespace).Create(pod)
+		_, err = c.CoreV1().Pods(namespace).Create(pod)
 		if err == nil || apierrs.IsAlreadyExists(err) {
 			break
 		}
@@ -105,28 +106,35 @@ type RunObjectConfig interface {
 	GetKind() schema.GroupKind
 	GetClient() clientset.Interface
 	GetInternalClient() internalclientset.Interface
+	GetScalesGetter() scaleclient.ScalesGetter
 	SetClient(clientset.Interface)
 	SetInternalClient(internalclientset.Interface)
+	SetScalesClient(scaleclient.ScalesGetter)
 	GetReplicas() int
+	GetLabelValue(string) (string, bool)
+	GetGroupResource() schema.GroupResource
 }
 
 type RCConfig struct {
-	Client         clientset.Interface
-	InternalClient internalclientset.Interface
-	Image          string
-	Command        []string
-	Name           string
-	Namespace      string
-	PollInterval   time.Duration
-	Timeout        time.Duration
-	PodStatusFile  *os.File
-	Replicas       int
-	CpuRequest     int64 // millicores
-	CpuLimit       int64 // millicores
-	MemRequest     int64 // bytes
-	MemLimit       int64 // bytes
-	ReadinessProbe *v1.Probe
-	DNSPolicy      *v1.DNSPolicy
+	Affinity          *v1.Affinity
+	Client            clientset.Interface
+	InternalClient    internalclientset.Interface
+	ScalesGetter      scaleclient.ScalesGetter
+	Image             string
+	Command           []string
+	Name              string
+	Namespace         string
+	PollInterval      time.Duration
+	Timeout           time.Duration
+	PodStatusFile     *os.File
+	Replicas          int
+	CpuRequest        int64 // millicores
+	CpuLimit          int64 // millicores
+	MemRequest        int64 // bytes
+	MemLimit          int64 // bytes
+	ReadinessProbe    *v1.Probe
+	DNSPolicy         *v1.DNSPolicy
+	PriorityClassName string
 
 	// Env vars, set the same for every pod.
 	Env map[string]string
@@ -274,6 +282,10 @@ func (config *DeploymentConfig) GetKind() schema.GroupKind {
 	return extensionsinternal.Kind("Deployment")
 }
 
+func (config *DeploymentConfig) GetGroupResource() schema.GroupResource {
+	return extensionsinternal.Resource("deployments")
+}
+
 func (config *DeploymentConfig) create() error {
 	deployment := &extensions.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -313,7 +325,7 @@ func (config *DeploymentConfig) create() error {
 
 	config.applyTo(&deployment.Spec.Template)
 
-	_, err := config.Client.Extensions().Deployments(config.Namespace).Create(deployment)
+	_, err := config.Client.ExtensionsV1beta1().Deployments(config.Namespace).Create(deployment)
 	if err != nil {
 		return fmt.Errorf("Error creating deployment: %v", err)
 	}
@@ -339,6 +351,10 @@ func (config *ReplicaSetConfig) Run() error {
 
 func (config *ReplicaSetConfig) GetKind() schema.GroupKind {
 	return extensionsinternal.Kind("ReplicaSet")
+}
+
+func (config *ReplicaSetConfig) GetGroupResource() schema.GroupResource {
+	return extensionsinternal.Resource("replicasets")
 }
 
 func (config *ReplicaSetConfig) create() error {
@@ -380,7 +396,7 @@ func (config *ReplicaSetConfig) create() error {
 
 	config.applyTo(&rs.Spec.Template)
 
-	_, err := config.Client.Extensions().ReplicaSets(config.Namespace).Create(rs)
+	_, err := config.Client.ExtensionsV1beta1().ReplicaSets(config.Namespace).Create(rs)
 	if err != nil {
 		return fmt.Errorf("Error creating replica set: %v", err)
 	}
@@ -406,6 +422,10 @@ func (config *JobConfig) Run() error {
 
 func (config *JobConfig) GetKind() schema.GroupKind {
 	return batchinternal.Kind("Job")
+}
+
+func (config *JobConfig) GetGroupResource() schema.GroupResource {
+	return batchinternal.Resource("jobs")
 }
 
 func (config *JobConfig) create() error {
@@ -443,7 +463,7 @@ func (config *JobConfig) create() error {
 
 	config.applyTo(&job.Spec.Template)
 
-	_, err := config.Client.Batch().Jobs(config.Namespace).Create(job)
+	_, err := config.Client.BatchV1().Jobs(config.Namespace).Create(job)
 	if err != nil {
 		return fmt.Errorf("Error creating job: %v", err)
 	}
@@ -479,12 +499,20 @@ func (config *RCConfig) GetKind() schema.GroupKind {
 	return api.Kind("ReplicationController")
 }
 
+func (config *RCConfig) GetGroupResource() schema.GroupResource {
+	return api.Resource("replicationcontrollers")
+}
+
 func (config *RCConfig) GetClient() clientset.Interface {
 	return config.Client
 }
 
 func (config *RCConfig) GetInternalClient() internalclientset.Interface {
 	return config.InternalClient
+}
+
+func (config *RCConfig) GetScalesGetter() scaleclient.ScalesGetter {
+	return config.ScalesGetter
 }
 
 func (config *RCConfig) SetClient(c clientset.Interface) {
@@ -495,8 +523,17 @@ func (config *RCConfig) SetInternalClient(c internalclientset.Interface) {
 	config.InternalClient = c
 }
 
+func (config *RCConfig) SetScalesClient(getter scaleclient.ScalesGetter) {
+	config.ScalesGetter = getter
+}
+
 func (config *RCConfig) GetReplicas() int {
 	return config.Replicas
+}
+
+func (config *RCConfig) GetLabelValue(key string) (string, bool) {
+	value, found := config.Labels[key]
+	return value, found
 }
 
 func (config *RCConfig) create() error {
@@ -519,6 +556,7 @@ func (config *RCConfig) create() error {
 					Labels: map[string]string{"name": config.Name},
 				},
 				Spec: v1.PodSpec{
+					Affinity: config.Affinity,
 					Containers: []v1.Container{
 						{
 							Name:           config.Name,
@@ -531,6 +569,7 @@ func (config *RCConfig) create() error {
 					DNSPolicy:                     *config.DNSPolicy,
 					NodeSelector:                  config.NodeSelector,
 					TerminationGracePeriodSeconds: &one,
+					PriorityClassName:             config.PriorityClassName,
 				},
 			},
 		},
@@ -545,7 +584,7 @@ func (config *RCConfig) create() error {
 
 	config.applyTo(rc.Spec.Template)
 
-	_, err := config.Client.Core().ReplicationControllers(config.Namespace).Create(rc)
+	_, err := config.Client.CoreV1().ReplicationControllers(config.Namespace).Create(rc)
 	if err != nil {
 		return fmt.Errorf("Error creating replication controller: %v", err)
 	}
@@ -606,6 +645,9 @@ func (config *RCConfig) applyTo(template *v1.PodTemplateSpec) {
 	}
 	if len(config.VolumeMounts) > 0 {
 		template.Spec.Containers[0].VolumeMounts = config.VolumeMounts
+	}
+	if config.PriorityClassName != "" {
+		template.Spec.PriorityClassName = config.PriorityClassName
 	}
 }
 
@@ -752,7 +794,7 @@ func (config *RCConfig) start() error {
 	if oldRunning != config.Replicas {
 		// List only pods from a given replication controller.
 		options := metav1.ListOptions{LabelSelector: label.String()}
-		if pods, err := config.Client.Core().Pods(metav1.NamespaceAll).List(options); err == nil {
+		if pods, err := config.Client.CoreV1().Pods(metav1.NamespaceAll).List(options); err == nil {
 
 			for _, pod := range pods.Items {
 				config.RCConfigLog("Pod %s\t%s\t%s\t%s", pod.Name, pod.Spec.NodeName, pod.Status.Phase, pod.DeletionTimestamp)
@@ -781,7 +823,7 @@ func StartPods(c clientset.Interface, replicas int, namespace string, podNamePre
 		pod.ObjectMeta.Labels["name"] = podName
 		pod.ObjectMeta.Labels["startPodsID"] = startPodsID
 		pod.Spec.Containers[0].Name = podName
-		_, err := c.Core().Pods(namespace).Create(&pod)
+		_, err := c.CoreV1().Pods(namespace).Create(&pod)
 		if err != nil {
 			return err
 		}
@@ -868,14 +910,7 @@ func (s *LabelNodePrepareStrategy) PreparePatch(*v1.Node) []byte {
 }
 
 func (s *LabelNodePrepareStrategy) CleanupNode(node *v1.Node) *v1.Node {
-	objCopy, err := api.Scheme.Copy(node)
-	if err != nil {
-		return &v1.Node{}
-	}
-	nodeCopy, ok := (objCopy).(*v1.Node)
-	if !ok {
-		return &v1.Node{}
-	}
+	nodeCopy := node.DeepCopy()
 	if node.Labels != nil && len(node.Labels[s.labelKey]) != 0 {
 		delete(nodeCopy.Labels, s.labelKey)
 	}
@@ -889,7 +924,7 @@ func DoPrepareNode(client clientset.Interface, node *v1.Node, strategy PrepareNo
 		return nil
 	}
 	for attempt := 0; attempt < retries; attempt++ {
-		if _, err = client.Core().Nodes().Patch(node.Name, types.MergePatchType, []byte(patch)); err == nil {
+		if _, err = client.CoreV1().Nodes().Patch(node.Name, types.MergePatchType, []byte(patch)); err == nil {
 			return nil
 		}
 		if !apierrs.IsConflict(err) {
@@ -902,7 +937,7 @@ func DoPrepareNode(client clientset.Interface, node *v1.Node, strategy PrepareNo
 
 func DoCleanupNode(client clientset.Interface, nodeName string, strategy PrepareNodeStrategy) error {
 	for attempt := 0; attempt < retries; attempt++ {
-		node, err := client.Core().Nodes().Get(nodeName, metav1.GetOptions{})
+		node, err := client.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("Skipping cleanup of Node: failed to get Node %v: %v", nodeName, err)
 		}
@@ -910,7 +945,7 @@ func DoCleanupNode(client clientset.Interface, nodeName string, strategy Prepare
 		if apiequality.Semantic.DeepEqual(node, updatedNode) {
 			return nil
 		}
-		if _, err = client.Core().Nodes().Update(updatedNode); err == nil {
+		if _, err = client.CoreV1().Nodes().Update(updatedNode); err == nil {
 			return nil
 		}
 		if !apierrs.IsConflict(err) {
@@ -987,7 +1022,7 @@ func MakePodSpec() v1.PodSpec {
 func makeCreatePod(client clientset.Interface, namespace string, podTemplate *v1.Pod) error {
 	var err error
 	for attempt := 0; attempt < retries; attempt++ {
-		if _, err := client.Core().Pods(namespace).Create(podTemplate); err == nil {
+		if _, err := client.CoreV1().Pods(namespace).Create(podTemplate); err == nil {
 			return nil
 		}
 		glog.Errorf("Error while creating pod, maybe retry: %v", err)
@@ -995,7 +1030,7 @@ func makeCreatePod(client clientset.Interface, namespace string, podTemplate *v1
 	return fmt.Errorf("Terminal error while creating pod, won't retry: %v", err)
 }
 
-func createPod(client clientset.Interface, namespace string, podCount int, podTemplate *v1.Pod) error {
+func CreatePod(client clientset.Interface, namespace string, podCount int, podTemplate *v1.Pod) error {
 	var createError error
 	lock := sync.Mutex{}
 	createPodFunc := func(i int) {
@@ -1032,7 +1067,7 @@ func createController(client clientset.Interface, controllerName, namespace stri
 	}
 	var err error
 	for attempt := 0; attempt < retries; attempt++ {
-		if _, err := client.Core().ReplicationControllers(namespace).Create(rc); err == nil {
+		if _, err := client.CoreV1().ReplicationControllers(namespace).Create(rc); err == nil {
 			return nil
 		}
 		glog.Errorf("Error while creating rc, maybe retry: %v", err)
@@ -1042,7 +1077,7 @@ func createController(client clientset.Interface, controllerName, namespace stri
 
 func NewCustomCreatePodStrategy(podTemplate *v1.Pod) TestPodCreateStrategy {
 	return func(client clientset.Interface, namespace string, podCount int) error {
-		return createPod(client, namespace, podCount, podTemplate)
+		return CreatePod(client, namespace, podCount, podTemplate)
 	}
 }
 
@@ -1068,7 +1103,7 @@ func NewSimpleWithControllerCreatePodStrategy(controllerName string) TestPodCrea
 		if err := createController(client, controllerName, namespace, podCount, basePod); err != nil {
 			return err
 		}
-		return createPod(client, namespace, podCount, basePod)
+		return CreatePod(client, namespace, podCount, basePod)
 	}
 }
 
@@ -1092,7 +1127,7 @@ func (config *SecretConfig) Run() error {
 		secret.StringData[k] = v
 	}
 
-	_, err := config.Client.Core().Secrets(config.Namespace).Create(secret)
+	_, err := config.Client.CoreV1().Secrets(config.Namespace).Create(secret)
 	if err != nil {
 		return fmt.Errorf("Error creating secret: %v", err)
 	}
@@ -1101,7 +1136,7 @@ func (config *SecretConfig) Run() error {
 }
 
 func (config *SecretConfig) Stop() error {
-	if err := config.Client.Core().Secrets(config.Namespace).Delete(config.Name, &metav1.DeleteOptions{}); err != nil {
+	if err := config.Client.CoreV1().Secrets(config.Namespace).Delete(config.Name, &metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("Error deleting secret: %v", err)
 	}
 	config.LogFunc("Deleted secret %v/%v", config.Namespace, config.Name)
@@ -1151,7 +1186,7 @@ func (config *ConfigMapConfig) Run() error {
 		configMap.Data[k] = v
 	}
 
-	_, err := config.Client.Core().ConfigMaps(config.Namespace).Create(configMap)
+	_, err := config.Client.CoreV1().ConfigMaps(config.Namespace).Create(configMap)
 	if err != nil {
 		return fmt.Errorf("Error creating configmap: %v", err)
 	}
@@ -1160,7 +1195,7 @@ func (config *ConfigMapConfig) Run() error {
 }
 
 func (config *ConfigMapConfig) Stop() error {
-	if err := config.Client.Core().ConfigMaps(config.Namespace).Delete(config.Name, &metav1.DeleteOptions{}); err != nil {
+	if err := config.Client.CoreV1().ConfigMaps(config.Namespace).Delete(config.Name, &metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("Error deleting configmap: %v", err)
 	}
 	config.LogFunc("Deleted configmap %v/%v", config.Namespace, config.Name)
@@ -1231,7 +1266,7 @@ func (config *DaemonConfig) Run() error {
 		},
 	}
 
-	_, err := config.Client.Extensions().DaemonSets(config.Namespace).Create(daemon)
+	_, err := config.Client.ExtensionsV1beta1().DaemonSets(config.Namespace).Create(daemon)
 	if err != nil {
 		return fmt.Errorf("Error creating DaemonSet %v: %v", config.Name, err)
 	}
@@ -1239,7 +1274,7 @@ func (config *DaemonConfig) Run() error {
 	var nodes *v1.NodeList
 	for i := 0; i < retries; i++ {
 		// Wait for all daemons to be running
-		nodes, err = config.Client.Core().Nodes().List(metav1.ListOptions{ResourceVersion: "0"})
+		nodes, err = config.Client.CoreV1().Nodes().List(metav1.ListOptions{ResourceVersion: "0"})
 		if err == nil {
 			break
 		} else if i+1 == retries {

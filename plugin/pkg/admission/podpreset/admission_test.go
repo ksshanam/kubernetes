@@ -20,12 +20,11 @@ import (
 	"reflect"
 	"testing"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kadmission "k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/authentication/user"
-	"k8s.io/kubernetes/pkg/api"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/settings"
 	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/internalversion"
@@ -66,8 +65,8 @@ func TestMergeEnv(t *testing.T) {
 
 	for name, test := range tests {
 		result, err := mergeEnv(
-			&settings.PodPreset{Spec: settings.PodPresetSpec{Env: test.mod}},
 			test.orig,
+			[]*settings.PodPreset{{Spec: settings.PodPresetSpec{Env: test.mod}}},
 		)
 		if test.shouldFail && err == nil {
 			t.Fatalf("expected test %q to fail but got nil", name)
@@ -162,8 +161,8 @@ func TestMergeEnvFrom(t *testing.T) {
 
 	for name, test := range tests {
 		result, err := mergeEnvFrom(
-			&settings.PodPreset{Spec: settings.PodPresetSpec{EnvFrom: test.mod}},
 			test.orig,
+			[]*settings.PodPreset{{Spec: settings.PodPresetSpec{EnvFrom: test.mod}}},
 		)
 		if test.shouldFail && err == nil {
 			t.Fatalf("expected test %q to fail but got nil", name)
@@ -295,8 +294,8 @@ func TestMergeVolumeMounts(t *testing.T) {
 
 	for name, test := range tests {
 		result, err := mergeVolumeMounts(
-			&settings.PodPreset{Spec: settings.PodPresetSpec{VolumeMounts: test.mod}},
 			test.orig,
+			[]*settings.PodPreset{{Spec: settings.PodPresetSpec{VolumeMounts: test.mod}}},
 		)
 		if test.shouldFail && err == nil {
 			t.Fatalf("expected test %q to fail but got nil", name)
@@ -376,8 +375,8 @@ func TestMergeVolumes(t *testing.T) {
 
 	for name, test := range tests {
 		result, err := mergeVolumes(
-			&settings.PodPreset{Spec: settings.PodPresetSpec{Volumes: test.mod}},
 			test.orig,
+			[]*settings.PodPreset{{Spec: settings.PodPresetSpec{Volumes: test.mod}}},
 		)
 		if test.shouldFail && err == nil {
 			t.Fatalf("expected test %q to fail but got nil", name)
@@ -393,7 +392,7 @@ func TestMergeVolumes(t *testing.T) {
 
 // NewTestAdmission provides an admission plugin with test implementations of internal structs.  It uses
 // an authorizer that always returns true.
-func NewTestAdmission(lister settingslisters.PodPresetLister, objects ...runtime.Object) kadmission.Interface {
+func NewTestAdmission(lister settingslisters.PodPresetLister, objects ...runtime.Object) kadmission.MutationInterface {
 	// Build a test client that the admission plugin can use to look up the service account missing from its cache
 	client := fake.NewSimpleClientset(objects...)
 
@@ -426,16 +425,16 @@ func TestAdmitConflictWithDifferentNamespaceShouldDoNothing(t *testing.T) {
 	}
 
 	pip := &settings.PodPreset{
-		ObjectMeta: v1.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      "hello",
 			Namespace: "othernamespace",
 		},
 		Spec: settings.PodPresetSpec{
-			Selector: v1.LabelSelector{
-				MatchExpressions: []v1.LabelSelectorRequirement{
+			Selector: metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{
 						Key:      "security",
-						Operator: v1.LabelSelectorOpIn,
+						Operator: metav1.LabelSelectorOpIn,
 						Values:   []string{"S2"},
 					},
 				},
@@ -472,16 +471,16 @@ func TestAdmitConflictWithNonMatchingLabelsShouldNotError(t *testing.T) {
 	}
 
 	pip := &settings.PodPreset{
-		ObjectMeta: v1.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      "hello",
 			Namespace: "namespace",
 		},
 		Spec: settings.PodPresetSpec{
-			Selector: v1.LabelSelector{
-				MatchExpressions: []v1.LabelSelectorRequirement{
+			Selector: metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{
 						Key:      "security",
-						Operator: v1.LabelSelectorOpIn,
+						Operator: metav1.LabelSelectorOpIn,
 						Values:   []string{"S3"},
 					},
 				},
@@ -493,6 +492,56 @@ func TestAdmitConflictWithNonMatchingLabelsShouldNotError(t *testing.T) {
 	err := admitPod(pod, pip)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAdmitConflictShouldNotModifyPod(t *testing.T) {
+	containerName := "container"
+
+	pod := &api.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mypod",
+			Namespace: "namespace",
+			Labels: map[string]string{
+				"security": "S2",
+			},
+		},
+		Spec: api.PodSpec{
+			Containers: []api.Container{
+				{
+					Name: containerName,
+					Env:  []api.EnvVar{{Name: "abc", Value: "value2"}, {Name: "ABC", Value: "value3"}},
+				},
+			},
+		},
+	}
+	origPod := *pod
+
+	pip := &settings.PodPreset{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "hello",
+			Namespace: "namespace",
+		},
+		Spec: settings.PodPresetSpec{
+			Selector: metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{
+						Key:      "security",
+						Operator: metav1.LabelSelectorOpIn,
+						Values:   []string{"S2"},
+					},
+				},
+			},
+			Env: []api.EnvVar{{Name: "abc", Value: "value"}, {Name: "ABC", Value: "value"}},
+		},
+	}
+
+	err := admitPod(pod, pip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(&origPod, pod) {
+		t.Fatalf("pod should not get modified in case of conflict origPod: %+v got: %+v", &origPod, pod)
 	}
 }
 
@@ -518,16 +567,16 @@ func TestAdmit(t *testing.T) {
 	}
 
 	pip := &settings.PodPreset{
-		ObjectMeta: v1.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      "hello",
 			Namespace: "namespace",
 		},
 		Spec: settings.PodPresetSpec{
-			Selector: v1.LabelSelector{
-				MatchExpressions: []v1.LabelSelectorRequirement{
+			Selector: metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{
 						Key:      "security",
-						Operator: v1.LabelSelectorOpIn,
+						Operator: metav1.LabelSelectorOpIn,
 						Values:   []string{"S2"},
 					},
 				},
@@ -578,16 +627,16 @@ func TestAdmitMirrorPod(t *testing.T) {
 	}
 
 	pip := &settings.PodPreset{
-		ObjectMeta: v1.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      "hello",
 			Namespace: "namespace",
 		},
 		Spec: settings.PodPresetSpec{
-			Selector: v1.LabelSelector{
-				MatchExpressions: []v1.LabelSelectorRequirement{
+			Selector: metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{
 						Key:      "security",
-						Operator: v1.LabelSelectorOpIn,
+						Operator: metav1.LabelSelectorOpIn,
 						Values:   []string{"S2"},
 					},
 				},
@@ -648,16 +697,16 @@ func TestExclusionNoAdmit(t *testing.T) {
 	}
 
 	pip := &settings.PodPreset{
-		ObjectMeta: v1.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      "hello",
 			Namespace: "namespace",
 		},
 		Spec: settings.PodPresetSpec{
-			Selector: v1.LabelSelector{
-				MatchExpressions: []v1.LabelSelectorRequirement{
+			Selector: metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{
 						Key:      "security",
-						Operator: v1.LabelSelectorOpIn,
+						Operator: metav1.LabelSelectorOpIn,
 						Values:   []string{"S2"},
 					},
 				},
@@ -679,12 +728,8 @@ func TestExclusionNoAdmit(t *testing.T) {
 			},
 		},
 	}
-	originalPod, err := api.Scheme.Copy(pod)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = admitPod(pod, pip)
+	originalPod := pod.DeepCopy()
+	err := admitPod(pod, pip)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,6 +737,70 @@ func TestExclusionNoAdmit(t *testing.T) {
 	// verify PodSpec has not been mutated
 	if !reflect.DeepEqual(pod, originalPod) {
 		t.Fatalf("Expected pod spec of '%v' to be unchanged", pod.Name)
+	}
+}
+
+func TestAdmitEmptyPodNamespace(t *testing.T) {
+	containerName := "container"
+
+	pod := &api.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "mypod",
+			Labels: map[string]string{
+				"security": "S2",
+			},
+		},
+		Spec: api.PodSpec{
+			Containers: []api.Container{
+				{
+					Name: containerName,
+					Env:  []api.EnvVar{{Name: "abc", Value: "value2"}, {Name: "ABCD", Value: "value3"}},
+				},
+			},
+		},
+	}
+
+	pip := &settings.PodPreset{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "hello",
+			Namespace: "different", // (pod will be submitted to namespace 'namespace')
+		},
+		Spec: settings.PodPresetSpec{
+			Selector: metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{
+						Key:      "security",
+						Operator: metav1.LabelSelectorOpIn,
+						Values:   []string{"S2"},
+					},
+				},
+			},
+			Volumes: []api.Volume{{Name: "vol", VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{}}}},
+			Env:     []api.EnvVar{{Name: "abcd", Value: "value"}, {Name: "ABC", Value: "value"}},
+			EnvFrom: []api.EnvFromSource{
+				{
+					ConfigMapRef: &api.ConfigMapEnvSource{
+						LocalObjectReference: api.LocalObjectReference{Name: "abc"},
+					},
+				},
+				{
+					Prefix: "pre_",
+					ConfigMapRef: &api.ConfigMapEnvSource{
+						LocalObjectReference: api.LocalObjectReference{Name: "abc"},
+					},
+				},
+			},
+		},
+	}
+	originalPod := pod.DeepCopy()
+	err := admitPod(pod, pip)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// verify PodSpec has not been mutated
+	if !reflect.DeepEqual(pod, originalPod) {
+		t.Fatalf("pod should not get modified in case of emptyNamespace origPod: %+v got: %+v", originalPod, pod)
 	}
 }
 

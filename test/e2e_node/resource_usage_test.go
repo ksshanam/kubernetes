@@ -23,15 +23,16 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
+	clientset "k8s.io/client-go/kubernetes"
 	stats "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
 	"k8s.io/kubernetes/test/e2e/framework"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
-var _ = framework.KubeDescribe("Resource-usage [Serial] [Slow]", func() {
+var _ = SIGDescribe("Resource-usage [Serial] [Slow]", func() {
 	const (
 		// Interval to poll /stats/container on a node
 		containerStatsPollingPeriod = 10 * time.Second
@@ -71,7 +72,7 @@ var _ = framework.KubeDescribe("Resource-usage [Serial] [Slow]", func() {
 					stats.SystemContainerRuntime: {0.50: 0.30, 0.95: 0.40},
 				},
 				memLimits: framework.ResourceUsagePerContainer{
-					stats.SystemContainerKubelet: &framework.ContainerResourceUsage{MemoryRSSInBytes: 100 * 1024 * 1024},
+					stats.SystemContainerKubelet: &framework.ContainerResourceUsage{MemoryRSSInBytes: 200 * 1024 * 1024},
 					stats.SystemContainerRuntime: &framework.ContainerResourceUsage{MemoryRSSInBytes: 400 * 1024 * 1024},
 				},
 			},
@@ -142,7 +143,7 @@ func runResourceUsageTest(f *framework.Framework, rc *ResourceCollector, testArg
 		// sleep for an interval here to measure steady data
 		sleepAfterCreatePods = 10 * time.Second
 	)
-	pods := newTestPods(testArg.podsNr, true, framework.GetPauseImageNameForHostArch(), "test_pod")
+	pods := newTestPods(testArg.podsNr, true, imageutils.GetPauseImageNameForHostArch(), "test_pod")
 
 	rc.Start()
 	// Explicitly delete pods to prevent namespace controller cleanning up timeout

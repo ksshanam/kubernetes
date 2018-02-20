@@ -1,17 +1,9 @@
-package(default_visibility = ["//visibility:public"])
-
-licenses(["notice"])
-
-load(
-    "@io_bazel_rules_go//go:def.bzl",
-    "go_library",
-)
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "go_default_library",
     srcs = [
         "client.go",
-        "client_unix.go",
         "controller.go",
         "event.go",
         "namespace.go",
@@ -22,12 +14,53 @@ go_library(
         "util.go",
         "validation.go",
         "volume.go",
-    ],
-    tags = ["automanaged"],
+    ] + select({
+        "@io_bazel_rules_go//go/platform:android": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:darwin": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:dragonfly": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:freebsd": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:linux": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:nacl": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:netbsd": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:openbsd": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:plan9": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:solaris": [
+            "client_unix.go",
+        ],
+        "@io_bazel_rules_go//go/platform:windows": [
+            "client_windows.go",
+        ],
+        "//conditions:default": [],
+    }),
+    importpath = "github.com/storageos/go-api",
+    visibility = ["//visibility:public"],
     deps = [
         "//vendor/github.com/gorilla/websocket:go_default_library",
         "//vendor/github.com/storageos/go-api/types:go_default_library",
-    ],
+    ] + select({
+        "@io_bazel_rules_go//go/platform:windows": [
+            "//vendor/github.com/Microsoft/go-winio:go_default_library",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 filegroup(
@@ -44,4 +77,5 @@ filegroup(
         "//vendor/github.com/storageos/go-api/types:all-srcs",
     ],
     tags = ["automanaged"],
+    visibility = ["//visibility:public"],
 )

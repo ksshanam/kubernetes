@@ -25,7 +25,8 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/util/exec"
+	"k8s.io/utils/exec"
+	fakeexec "k8s.io/utils/exec/testing"
 )
 
 var tcClassOutput = `class htb 1:1 root prio 0 rate 10000bit ceil 10000bit burst 1600b cburst 1600b 
@@ -63,15 +64,15 @@ func TestNextClassID(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		fcmd := exec.FakeCmd{
-			CombinedOutputScript: []exec.FakeCombinedOutputAction{
+		fcmd := fakeexec.FakeCmd{
+			CombinedOutputScript: []fakeexec.FakeCombinedOutputAction{
 				func() ([]byte, error) { return []byte(test.output), test.err },
 			},
 		}
-		fexec := exec.FakeExec{
-			CommandScript: []exec.FakeCommandAction{
+		fexec := fakeexec.FakeExec{
+			CommandScript: []fakeexec.FakeCommandAction{
 				func(cmd string, args ...string) exec.Cmd {
-					return exec.InitFakeCmd(&fcmd, cmd, args...)
+					return fakeexec.InitFakeCmd(&fcmd, cmd, args...)
 				},
 			},
 		}
@@ -245,20 +246,20 @@ func TestFindCIDRClass(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		fcmd := exec.FakeCmd{
-			CombinedOutputScript: []exec.FakeCombinedOutputAction{
+		fcmd := fakeexec.FakeCmd{
+			CombinedOutputScript: []fakeexec.FakeCombinedOutputAction{
 				func() ([]byte, error) { return []byte(test.output), test.err },
 			},
 		}
-		fexec := exec.FakeExec{
-			CommandScript: []exec.FakeCommandAction{
+		fexec := fakeexec.FakeExec{
+			CommandScript: []fakeexec.FakeCommandAction{
 				func(cmd string, args ...string) exec.Cmd {
-					return exec.InitFakeCmd(&fcmd, cmd, args...)
+					return fakeexec.InitFakeCmd(&fcmd, cmd, args...)
 				},
 			},
 		}
 		shaper := &tcShaper{e: &fexec}
-		class, handle, found, err := shaper.findCIDRClass(test.cidr)
+		classAndHandle, found, err := shaper.findCIDRClass(test.cidr)
 		if test.expectErr {
 			if err == nil {
 				t.Errorf("unexpected non-error")
@@ -269,14 +270,14 @@ func TestFindCIDRClass(t *testing.T) {
 			}
 			if test.expectNotFound {
 				if found {
-					t.Errorf("unexpectedly found an interface: %s %s", class, handle)
+					t.Errorf("unexpectedly found an interface: %s", classAndHandle)
 				}
 			} else {
-				if class != test.expectedClass {
-					t.Errorf("expected: %s, found %s", test.expectedClass, class)
+				if classAndHandle[0][0] != test.expectedClass {
+					t.Errorf("expected class: %s, found %s", test.expectedClass, classAndHandle)
 				}
-				if handle != test.expectedHandle {
-					t.Errorf("expected: %s, found %s", test.expectedHandle, handle)
+				if classAndHandle[0][1] != test.expectedHandle {
+					t.Errorf("expected handle: %s, found %s", test.expectedHandle, classAndHandle)
 				}
 			}
 		}
@@ -284,15 +285,15 @@ func TestFindCIDRClass(t *testing.T) {
 }
 
 func TestGetCIDRs(t *testing.T) {
-	fcmd := exec.FakeCmd{
-		CombinedOutputScript: []exec.FakeCombinedOutputAction{
+	fcmd := fakeexec.FakeCmd{
+		CombinedOutputScript: []fakeexec.FakeCombinedOutputAction{
 			func() ([]byte, error) { return []byte(tcFilterOutput), nil },
 		},
 	}
-	fexec := exec.FakeExec{
-		CommandScript: []exec.FakeCommandAction{
+	fexec := fakeexec.FakeExec{
+		CommandScript: []fakeexec.FakeCommandAction{
 			func(cmd string, args ...string) exec.Cmd {
-				return exec.InitFakeCmd(&fcmd, cmd, args...)
+				return fakeexec.InitFakeCmd(&fcmd, cmd, args...)
 			},
 		},
 	}
@@ -349,8 +350,8 @@ func TestLimit(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		fcmd := exec.FakeCmd{
-			CombinedOutputScript: []exec.FakeCombinedOutputAction{
+		fcmd := fakeexec.FakeCmd{
+			CombinedOutputScript: []fakeexec.FakeCombinedOutputAction{
 				func() ([]byte, error) { return []byte(tcClassOutput), test.err },
 				func() ([]byte, error) { return []byte{}, test.err },
 				func() ([]byte, error) { return []byte{}, test.err },
@@ -360,14 +361,14 @@ func TestLimit(t *testing.T) {
 			},
 		}
 
-		fexec := exec.FakeExec{
-			CommandScript: []exec.FakeCommandAction{
-				func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
-				func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
-				func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
-				func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
-				func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
-				func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
+		fexec := fakeexec.FakeExec{
+			CommandScript: []fakeexec.FakeCommandAction{
+				func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
+				func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
+				func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
+				func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
+				func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
+				func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
 			},
 		}
 		iface := "cbr0"
@@ -465,19 +466,19 @@ func TestReset(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		fcmd := exec.FakeCmd{
-			CombinedOutputScript: []exec.FakeCombinedOutputAction{
+		fcmd := fakeexec.FakeCmd{
+			CombinedOutputScript: []fakeexec.FakeCombinedOutputAction{
 				func() ([]byte, error) { return []byte(tcFilterOutput), test.err },
 				func() ([]byte, error) { return []byte{}, test.err },
 				func() ([]byte, error) { return []byte{}, test.err },
 			},
 		}
 
-		fexec := exec.FakeExec{
-			CommandScript: []exec.FakeCommandAction{
-				func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
-				func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
-				func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
+		fexec := fakeexec.FakeExec{
+			CommandScript: []fakeexec.FakeCommandAction{
+				func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
+				func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
+				func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
 			},
 		}
 		iface := "cbr0"
@@ -524,15 +525,15 @@ func TestReset(t *testing.T) {
 var tcQdisc = "qdisc htb 1: root refcnt 2 r2q 10 default 30 direct_packets_stat 0\n"
 
 func TestReconcileInterfaceExists(t *testing.T) {
-	fcmd := exec.FakeCmd{
-		CombinedOutputScript: []exec.FakeCombinedOutputAction{
+	fcmd := fakeexec.FakeCmd{
+		CombinedOutputScript: []fakeexec.FakeCombinedOutputAction{
 			func() ([]byte, error) { return []byte(tcQdisc), nil },
 		},
 	}
 
-	fexec := exec.FakeExec{
-		CommandScript: []exec.FakeCommandAction{
-			func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
+	fexec := fakeexec.FakeExec{
+		CommandScript: []fakeexec.FakeCommandAction{
+			func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
 		},
 	}
 	iface := "cbr0"
@@ -562,17 +563,17 @@ func TestReconcileInterfaceExists(t *testing.T) {
 }
 
 func testReconcileInterfaceHasNoData(t *testing.T, output string) {
-	fcmd := exec.FakeCmd{
-		CombinedOutputScript: []exec.FakeCombinedOutputAction{
+	fcmd := fakeexec.FakeCmd{
+		CombinedOutputScript: []fakeexec.FakeCombinedOutputAction{
 			func() ([]byte, error) { return []byte(output), nil },
 			func() ([]byte, error) { return []byte(output), nil },
 		},
 	}
 
-	fexec := exec.FakeExec{
-		CommandScript: []exec.FakeCommandAction{
-			func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
-			func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
+	fexec := fakeexec.FakeExec{
+		CommandScript: []fakeexec.FakeCommandAction{
+			func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
+			func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
 		},
 	}
 	iface := "cbr0"
@@ -635,19 +636,19 @@ var tcQdiscWrong = []string{
 
 func TestReconcileInterfaceIsWrong(t *testing.T) {
 	for _, test := range tcQdiscWrong {
-		fcmd := exec.FakeCmd{
-			CombinedOutputScript: []exec.FakeCombinedOutputAction{
+		fcmd := fakeexec.FakeCmd{
+			CombinedOutputScript: []fakeexec.FakeCombinedOutputAction{
 				func() ([]byte, error) { return []byte(test), nil },
 				func() ([]byte, error) { return []byte("\n"), nil },
 				func() ([]byte, error) { return []byte("\n"), nil },
 			},
 		}
 
-		fexec := exec.FakeExec{
-			CommandScript: []exec.FakeCommandAction{
-				func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
-				func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
-				func(cmd string, args ...string) exec.Cmd { return exec.InitFakeCmd(&fcmd, cmd, args...) },
+		fexec := fakeexec.FakeExec{
+			CommandScript: []fakeexec.FakeCommandAction{
+				func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
+				func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
+				func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
 			},
 		}
 		iface := "cbr0"

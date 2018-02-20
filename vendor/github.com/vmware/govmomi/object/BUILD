@@ -1,11 +1,4 @@
-package(default_visibility = ["//visibility:public"])
-
-licenses(["notice"])
-
-load(
-    "@io_bazel_rules_go//go:def.bzl",
-    "go_library",
-)
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "go_default_library",
@@ -45,13 +38,11 @@ go_library(
         "host_virtual_nic_manager.go",
         "host_vsan_internal_system.go",
         "host_vsan_system.go",
-        "http_nfc_lease.go",
         "namespace_manager.go",
         "network.go",
         "network_reference.go",
         "opaque_network.go",
         "option_manager.go",
-        "ovf_manager.go",
         "resource_pool.go",
         "search_index.go",
         "storage_pod.go",
@@ -65,8 +56,10 @@ go_library(
         "virtual_machine.go",
         "vmware_distributed_virtual_switch.go",
     ],
-    tags = ["automanaged"],
+    importpath = "github.com/vmware/govmomi/object",
+    visibility = ["//visibility:public"],
     deps = [
+        "//vendor/github.com/vmware/govmomi/nfc:go_default_library",
         "//vendor/github.com/vmware/govmomi/property:go_default_library",
         "//vendor/github.com/vmware/govmomi/session:go_default_library",
         "//vendor/github.com/vmware/govmomi/task:go_default_library",
@@ -90,4 +83,5 @@ filegroup(
     name = "all-srcs",
     srcs = [":package-srcs"],
     tags = ["automanaged"],
+    visibility = ["//visibility:public"],
 )

@@ -20,21 +20,32 @@ set -o pipefail
 export KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
 source "${KUBE_ROOT}/hack/lib/init.sh"
 
-# Remove generated files prior to running gazel.
+kube::util::ensure-gnu-sed
+
+# Remove generated files prior to running kazel.
 # TODO(spxtr): Remove this line once Bazel is the only way to build.
 rm -f "${KUBE_ROOT}/pkg/generated/openapi/zz_generated.openapi.go"
 
-go get -u gopkg.in/mikedanese/gazel.v17/gazel
+# The git commit sha1s here should match the values in $KUBE_ROOT/WORKSPACE.
+kube::util::go_install_from_commit \
+    github.com/kubernetes/repo-infra/kazel \
+    97099dccc8807e9159dc28f374a8f0602cab07e1
+kube::util::go_install_from_commit \
+    github.com/bazelbuild/bazel-gazelle/cmd/gazelle \
+    39e8257565d3917c1674bf37d6538c10cdac2260
 
-for path in ${GOPATH//:/ }; do
-  if [[ -e "${path}/bin/gazel" ]]; then
-    gazel="${path}/bin/gazel"
-    break
-  fi
-done
-if [[ -z "${gazel:-}" ]]; then
-  echo "Couldn't find gazel on the GOPATH."
-  exit 1
-fi
+touch "${KUBE_ROOT}/vendor/BUILD"
 
-"${gazel}" -root="$(kube::realpath ${KUBE_ROOT})"
+gazelle fix \
+    -build_file_name=BUILD,BUILD.bazel \
+    -external=vendored \
+    -proto=legacy \
+    -mode=fix
+# gazelle gets confused by our staging/ directory, prepending an extra
+# "k8s.io/kubernetes/staging/src" to the import path.
+# gazelle won't follow the symlinks in vendor/, so we can't just exclude
+# staging/. Instead we just fix the bad paths with sed.
+find staging -name BUILD -o -name BUILD.bazel | \
+  xargs ${SED} -i 's|\(importpath = "\)k8s.io/kubernetes/staging/src/\(.*\)|\1\2|'
+
+kazel

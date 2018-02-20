@@ -21,35 +21,32 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"sort"
 	"strings"
 	"text/tabwriter"
 
-	"github.com/fatih/camelcase"
-
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	metav1alpha1 "k8s.io/apimachinery/pkg/apis/meta/v1alpha1"
+	metav1beta1 "k8s.io/apimachinery/pkg/apis/meta/v1beta1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/kubernetes/pkg/util/slice"
 )
 
 type TablePrinter interface {
-	PrintTable(obj runtime.Object, options PrintOptions) (*metav1alpha1.Table, error)
+	PrintTable(obj runtime.Object, options PrintOptions) (*metav1beta1.Table, error)
 }
 
 type PrintHandler interface {
 	Handler(columns, columnsWithWide []string, printFunc interface{}) error
-	TableHandler(columns []metav1alpha1.TableColumnDefinition, printFunc interface{}) error
+	TableHandler(columns []metav1beta1.TableColumnDefinition, printFunc interface{}) error
+	DefaultTableHandler(columns []metav1beta1.TableColumnDefinition, printFunc interface{}) error
 }
 
 var withNamespacePrefixColumns = []string{"NAMESPACE"} // TODO(erictune): print cluster name too.
 
 type handlerEntry struct {
-	columnDefinitions []metav1alpha1.TableColumnDefinition
+	columnDefinitions []metav1beta1.TableColumnDefinition
 	printRows         bool
 	printFunc         reflect.Value
 	args              []reflect.Value
@@ -60,12 +57,13 @@ type handlerEntry struct {
 // will only be printed if the object type changes. This makes it useful for printing items
 // received from watches.
 type HumanReadablePrinter struct {
-	handlerMap    map[reflect.Type]*handlerEntry
-	options       PrintOptions
-	lastType      reflect.Type
-	skipTabWriter bool
-	encoder       runtime.Encoder
-	decoder       runtime.Decoder
+	handlerMap     map[reflect.Type]*handlerEntry
+	defaultHandler *handlerEntry
+	options        PrintOptions
+	lastType       interface{}
+	skipTabWriter  bool
+	encoder        runtime.Encoder
+	decoder        runtime.Decoder
 }
 
 var _ PrintHandler = &HumanReadablePrinter{}
@@ -128,15 +126,15 @@ func (h *HumanReadablePrinter) EnsurePrintHeaders() {
 // Handler adds a print handler with a given set of columns to HumanReadablePrinter instance.
 // See ValidatePrintHandlerFunc for required method signature.
 func (h *HumanReadablePrinter) Handler(columns, columnsWithWide []string, printFunc interface{}) error {
-	var columnDefinitions []metav1alpha1.TableColumnDefinition
+	var columnDefinitions []metav1beta1.TableColumnDefinition
 	for _, column := range columns {
-		columnDefinitions = append(columnDefinitions, metav1alpha1.TableColumnDefinition{
+		columnDefinitions = append(columnDefinitions, metav1beta1.TableColumnDefinition{
 			Name: column,
 			Type: "string",
 		})
 	}
 	for _, column := range columnsWithWide {
-		columnDefinitions = append(columnDefinitions, metav1alpha1.TableColumnDefinition{
+		columnDefinitions = append(columnDefinitions, metav1beta1.TableColumnDefinition{
 			Name:     column,
 			Type:     "string",
 			Priority: 1,
@@ -166,7 +164,7 @@ func (h *HumanReadablePrinter) Handler(columns, columnsWithWide []string, printF
 
 // TableHandler adds a print handler with a given set of columns to HumanReadablePrinter instance.
 // See ValidateRowPrintHandlerFunc for required method signature.
-func (h *HumanReadablePrinter) TableHandler(columnDefinitions []metav1alpha1.TableColumnDefinition, printFunc interface{}) error {
+func (h *HumanReadablePrinter) TableHandler(columnDefinitions []metav1beta1.TableColumnDefinition, printFunc interface{}) error {
 	printFuncValue := reflect.ValueOf(printFunc)
 	if err := ValidateRowPrintHandlerFunc(printFuncValue); err != nil {
 		utilruntime.HandleError(fmt.Errorf("unable to register print function: %v", err))
@@ -188,13 +186,32 @@ func (h *HumanReadablePrinter) TableHandler(columnDefinitions []metav1alpha1.Tab
 	return nil
 }
 
+// DefaultTableHandler registers a set of columns and a print func that is given a chance to process
+// any object without an explicit handler. Only the most recently set print handler is used.
+// See ValidateRowPrintHandlerFunc for required method signature.
+func (h *HumanReadablePrinter) DefaultTableHandler(columnDefinitions []metav1beta1.TableColumnDefinition, printFunc interface{}) error {
+	printFuncValue := reflect.ValueOf(printFunc)
+	if err := ValidateRowPrintHandlerFunc(printFuncValue); err != nil {
+		utilruntime.HandleError(fmt.Errorf("unable to register print function: %v", err))
+		return err
+	}
+	entry := &handlerEntry{
+		columnDefinitions: columnDefinitions,
+		printRows:         true,
+		printFunc:         printFuncValue,
+	}
+
+	h.defaultHandler = entry
+	return nil
+}
+
 // ValidateRowPrintHandlerFunc validates print handler signature.
 // printFunc is the function that will be called to print an object.
 // It must be of the following type:
-//  func printFunc(object ObjectType, options PrintOptions) ([]metav1alpha1.TableRow, error)
+//  func printFunc(object ObjectType, options PrintOptions) ([]metav1beta1.TableRow, error)
 // where ObjectType is the type of the object that will be printed, and the first
 // return value is an array of rows, with each row containing a number of cells that
-// match the number of coulmns defined for that printer function.
+// match the number of columns defined for that printer function.
 func ValidateRowPrintHandlerFunc(printFunc reflect.Value) error {
 	if printFunc.Kind() != reflect.Func {
 		return fmt.Errorf("invalid print handler. %#v is not a function", printFunc)
@@ -205,10 +222,10 @@ func ValidateRowPrintHandlerFunc(printFunc reflect.Value) error {
 			"Must accept 2 parameters and return 2 value.")
 	}
 	if funcType.In(1) != reflect.TypeOf((*PrintOptions)(nil)).Elem() ||
-		funcType.Out(0) != reflect.TypeOf((*[]metav1alpha1.TableRow)(nil)).Elem() ||
+		funcType.Out(0) != reflect.TypeOf((*[]metav1beta1.TableRow)(nil)).Elem() ||
 		funcType.Out(1) != reflect.TypeOf((*error)(nil)).Elem() {
 		return fmt.Errorf("invalid print handler. The expected signature is: "+
-			"func handler(obj %v, options PrintOptions) ([]metav1alpha1.TableRow, error)", funcType.In(0))
+			"func handler(obj %v, options PrintOptions) ([]metav1beta1.TableRow, error)", funcType.In(0))
 	}
 	return nil
 }
@@ -266,7 +283,7 @@ func (h *HumanReadablePrinter) unknown(data []byte, w io.Writer) error {
 	return err
 }
 
-func (h *HumanReadablePrinter) printHeader(columnNames []string, w io.Writer) error {
+func printHeader(columnNames []string, w io.Writer) error {
 	if _, err := fmt.Fprintf(w, "%s\n", strings.Join(columnNames, "\t")); err != nil {
 		return err
 	}
@@ -286,154 +303,37 @@ func (h *HumanReadablePrinter) PrintObj(obj runtime.Object, output io.Writer) er
 	}
 
 	// display tables following the rules of options
-	if table, ok := obj.(*metav1alpha1.Table); ok {
+	if table, ok := obj.(*metav1beta1.Table); ok {
 		if err := DecorateTable(table, h.options); err != nil {
 			return err
 		}
 		return PrintTable(table, output, h.options)
 	}
 
-	// check if the object is unstructured.  If so, let's attempt to convert it to a type we can understand before
-	// trying to print, since the printers are keyed by type.  This is extremely expensive.
+	// check if the object is unstructured. If so, let's attempt to convert it to a type we can understand before
+	// trying to print, since the printers are keyed by type. This is extremely expensive.
 	if h.encoder != nil && h.decoder != nil {
 		obj, _ = decodeUnknownObject(obj, h.encoder, h.decoder)
 	}
 
+	// print with a registered handler
 	t := reflect.TypeOf(obj)
 	if handler := h.handlerMap[t]; handler != nil {
-		if !h.options.NoHeaders && t != h.lastType {
-			var headers []string
-			for _, column := range handler.columnDefinitions {
-				if column.Priority != 0 && !h.options.Wide {
-					continue
-				}
-				headers = append(headers, strings.ToUpper(column.Name))
-			}
-			headers = append(headers, formatLabelHeaders(h.options.ColumnLabels)...)
-			// LABELS is always the last column.
-			headers = append(headers, formatShowLabelsHeader(h.options.ShowLabels, t)...)
-			if h.options.WithNamespace {
-				headers = append(withNamespacePrefixColumns, headers...)
-			}
-			h.printHeader(headers, output)
-			h.lastType = t
-		}
-
-		if handler.printRows {
-			args := []reflect.Value{reflect.ValueOf(obj), reflect.ValueOf(h.options)}
-			results := handler.printFunc.Call(args)
-			if results[1].IsNil() {
-				rows := results[0].Interface().([]metav1alpha1.TableRow)
-				for _, row := range rows {
-
-					if h.options.WithNamespace {
-						if obj := row.Object.Object; obj != nil {
-							if m, err := meta.Accessor(obj); err == nil {
-								fmt.Fprint(output, m.GetNamespace())
-							}
-						}
-						fmt.Fprint(output, "\t")
-					}
-
-					for i, cell := range row.Cells {
-						if i != 0 {
-							fmt.Fprint(output, "\t")
-						} else {
-							// TODO: remove this once we drop the legacy printers
-							if h.options.WithKind && len(h.options.Kind) > 0 {
-								fmt.Fprintf(output, "%s/%s", h.options.Kind, cell)
-								continue
-							}
-						}
-						fmt.Fprint(output, cell)
-					}
-
-					hasLabels := len(h.options.ColumnLabels) > 0
-					if obj := row.Object.Object; obj != nil && (hasLabels || h.options.ShowLabels) {
-						if m, err := meta.Accessor(obj); err == nil {
-							for _, value := range labelValues(m.GetLabels(), h.options) {
-								output.Write([]byte("\t"))
-								output.Write([]byte(value))
-							}
-						}
-					}
-
-					output.Write([]byte("\n"))
-				}
-				return nil
-			}
-			return results[1].Interface().(error)
-		}
-
-		// TODO: this code path is deprecated and will be removed when all handlers are row printers
-		args := []reflect.Value{reflect.ValueOf(obj), reflect.ValueOf(output), reflect.ValueOf(h.options)}
-		resultValue := handler.printFunc.Call(args)[0]
-		if resultValue.IsNil() {
-			return nil
-		}
-		return resultValue.Interface().(error)
-	}
-
-	if _, err := meta.Accessor(obj); err == nil {
-		// we don't recognize this type, but we can still attempt to print some reasonable information about.
-		unstructured, ok := obj.(runtime.Unstructured)
-		if !ok {
-			return fmt.Errorf("error: unknown type %T, expected unstructured in %#v", obj, h.handlerMap)
-		}
-
-		content := unstructured.UnstructuredContent()
-
-		// we'll elect a few more fields to print depending on how much columns are already taken
-		maxDiscoveredFieldsToPrint := 3
-		maxDiscoveredFieldsToPrint = maxDiscoveredFieldsToPrint - len(h.options.ColumnLabels)
-		if h.options.WithNamespace { // where's my ternary
-			maxDiscoveredFieldsToPrint--
-		}
-		if h.options.ShowLabels {
-			maxDiscoveredFieldsToPrint--
-		}
-		if maxDiscoveredFieldsToPrint < 0 {
-			maxDiscoveredFieldsToPrint = 0
-		}
-
-		var discoveredFieldNames []string                    // we want it predictable so this will be used to sort
-		ignoreIfDiscovered := []string{"kind", "apiVersion"} // these are already covered
-		for field, value := range content {
-			if slice.ContainsString(ignoreIfDiscovered, field, nil) {
-				continue
-			}
-			switch value.(type) {
-			case map[string]interface{}:
-				// just simpler types
-				continue
-			}
-			discoveredFieldNames = append(discoveredFieldNames, field)
-		}
-		sort.Strings(discoveredFieldNames)
-		if len(discoveredFieldNames) > maxDiscoveredFieldsToPrint {
-			discoveredFieldNames = discoveredFieldNames[:maxDiscoveredFieldsToPrint]
-		}
-
-		if !h.options.NoHeaders && t != h.lastType {
-			headers := []string{"NAME", "KIND"}
-			for _, discoveredField := range discoveredFieldNames {
-				fieldAsHeader := strings.ToUpper(strings.Join(camelcase.Split(discoveredField), " "))
-				headers = append(headers, fieldAsHeader)
-			}
-			headers = append(headers, formatLabelHeaders(h.options.ColumnLabels)...)
-			// LABELS is always the last column.
-			headers = append(headers, formatShowLabelsHeader(h.options.ShowLabels, t)...)
-			if h.options.WithNamespace {
-				headers = append(withNamespacePrefixColumns, headers...)
-			}
-			h.printHeader(headers, output)
-			h.lastType = t
-		}
-
-		// if the error isn't nil, report the "I don't recognize this" error
-		if err := printUnstructured(unstructured, output, discoveredFieldNames, h.options); err != nil {
+		includeHeaders := h.lastType != t && !h.options.NoHeaders
+		if err := printRowsForHandlerEntry(output, handler, obj, h.options, includeHeaders); err != nil {
 			return err
 		}
+		h.lastType = t
+		return nil
+	}
+
+	// print with the default handler if set, and use the columns from the last time
+	if h.defaultHandler != nil {
+		includeHeaders := h.lastType != h.defaultHandler && !h.options.NoHeaders
+		if err := printRowsForHandlerEntry(output, h.defaultHandler, obj, h.options, includeHeaders); err != nil {
+			return err
+		}
+		h.lastType = h.defaultHandler
 		return nil
 	}
 
@@ -441,19 +341,19 @@ func (h *HumanReadablePrinter) PrintObj(obj runtime.Object, output io.Writer) er
 	return fmt.Errorf("error: unknown type %#v", obj)
 }
 
-func hasCondition(conditions []metav1alpha1.TableRowCondition, t metav1alpha1.RowConditionType) bool {
+func hasCondition(conditions []metav1beta1.TableRowCondition, t metav1beta1.RowConditionType) bool {
 	for _, condition := range conditions {
 		if condition.Type == t {
-			return condition.Status == metav1alpha1.ConditionTrue
+			return condition.Status == metav1beta1.ConditionTrue
 		}
 	}
 	return false
 }
 
 // PrintTable prints a table to the provided output respecting the filtering rules for options
-// for wide columns and filetred rows. It filters out rows that are Completed. You should call
+// for wide columns and filtered rows. It filters out rows that are Completed. You should call
 // DecorateTable if you receive a table from a remote server before calling PrintTable.
-func PrintTable(table *metav1alpha1.Table, output io.Writer, options PrintOptions) error {
+func PrintTable(table *metav1beta1.Table, output io.Writer, options PrintOptions) error {
 	if !options.NoHeaders {
 		first := true
 		for _, column := range table.ColumnDefinitions {
@@ -470,7 +370,7 @@ func PrintTable(table *metav1alpha1.Table, output io.Writer, options PrintOption
 		fmt.Fprintln(output)
 	}
 	for _, row := range table.Rows {
-		if !options.ShowAll && hasCondition(row.Conditions, metav1alpha1.RowCompleted) {
+		if !options.ShowAll && hasCondition(row.Conditions, metav1beta1.RowCompleted) {
 			continue
 		}
 		first := true
@@ -497,7 +397,7 @@ func PrintTable(table *metav1alpha1.Table, output io.Writer, options PrintOption
 // namespace column. It will fill empty columns with nil (if the object
 // does not expose metadata). It returns an error if the table cannot
 // be decorated.
-func DecorateTable(table *metav1alpha1.Table, options PrintOptions) error {
+func DecorateTable(table *metav1beta1.Table, options PrintOptions) error {
 	width := len(table.ColumnDefinitions) + len(options.ColumnLabels)
 	if options.WithNamespace {
 		width++
@@ -520,22 +420,22 @@ func DecorateTable(table *metav1alpha1.Table, options PrintOptions) error {
 	}
 
 	if width != len(table.ColumnDefinitions) {
-		columns = make([]metav1alpha1.TableColumnDefinition, 0, width)
+		columns = make([]metav1beta1.TableColumnDefinition, 0, width)
 		if options.WithNamespace {
-			columns = append(columns, metav1alpha1.TableColumnDefinition{
+			columns = append(columns, metav1beta1.TableColumnDefinition{
 				Name: "Namespace",
 				Type: "string",
 			})
 		}
 		columns = append(columns, table.ColumnDefinitions...)
 		for _, label := range formatLabelHeaders(options.ColumnLabels) {
-			columns = append(columns, metav1alpha1.TableColumnDefinition{
+			columns = append(columns, metav1beta1.TableColumnDefinition{
 				Name: label,
 				Type: "string",
 			})
 		}
 		if options.ShowLabels {
-			columns = append(columns, metav1alpha1.TableColumnDefinition{
+			columns = append(columns, metav1beta1.TableColumnDefinition{
 				Name: "Labels",
 				Type: "string",
 			})
@@ -592,7 +492,7 @@ func DecorateTable(table *metav1alpha1.Table, options PrintOptions) error {
 // PrintTable returns a table for the provided object, using the printer registered for that type. It returns
 // a table that includes all of the information requested by options, but will not remove rows or columns. The
 // caller is responsible for applying rules related to filtering rows or columns.
-func (h *HumanReadablePrinter) PrintTable(obj runtime.Object, options PrintOptions) (*metav1alpha1.Table, error) {
+func (h *HumanReadablePrinter) PrintTable(obj runtime.Object, options PrintOptions) (*metav1beta1.Table, error) {
 	t := reflect.TypeOf(obj)
 	handler, ok := h.handlerMap[t]
 	if !ok {
@@ -610,7 +510,7 @@ func (h *HumanReadablePrinter) PrintTable(obj runtime.Object, options PrintOptio
 
 	columns := handler.columnDefinitions
 	if !options.Wide {
-		columns = make([]metav1alpha1.TableColumnDefinition, 0, len(handler.columnDefinitions))
+		columns = make([]metav1beta1.TableColumnDefinition, 0, len(handler.columnDefinitions))
 		for i := range handler.columnDefinitions {
 			if handler.columnDefinitions[i].Priority != 0 {
 				continue
@@ -618,12 +518,22 @@ func (h *HumanReadablePrinter) PrintTable(obj runtime.Object, options PrintOptio
 			columns = append(columns, handler.columnDefinitions[i])
 		}
 	}
-	table := &metav1alpha1.Table{
+	table := &metav1beta1.Table{
 		ListMeta: metav1.ListMeta{
 			ResourceVersion: "",
 		},
 		ColumnDefinitions: columns,
-		Rows:              results[0].Interface().([]metav1alpha1.TableRow),
+		Rows:              results[0].Interface().([]metav1beta1.TableRow),
+	}
+	if m, err := meta.ListAccessor(obj); err == nil {
+		table.ResourceVersion = m.GetResourceVersion()
+		table.SelfLink = m.GetSelfLink()
+		table.Continue = m.GetContinue()
+	} else {
+		if m, err := meta.CommonAccessor(obj); err == nil {
+			table.ResourceVersion = m.GetResourceVersion()
+			table.SelfLink = m.GetSelfLink()
+		}
 	}
 	if err := DecorateTable(table, options); err != nil {
 		return nil, err
@@ -631,11 +541,98 @@ func (h *HumanReadablePrinter) PrintTable(obj runtime.Object, options PrintOptio
 	return table, nil
 }
 
+// printRowsForHandlerEntry prints the incremental table output (headers if the current type is
+// different from lastType) including all the rows in the object. It returns the current type
+// or an error, if any.
+func printRowsForHandlerEntry(output io.Writer, handler *handlerEntry, obj runtime.Object, options PrintOptions, includeHeaders bool) error {
+	var results []reflect.Value
+	if handler.printRows {
+		args := []reflect.Value{reflect.ValueOf(obj), reflect.ValueOf(options)}
+		results = handler.printFunc.Call(args)
+		if !results[1].IsNil() {
+			return results[1].Interface().(error)
+		}
+	}
+
+	if includeHeaders {
+		var headers []string
+		for _, column := range handler.columnDefinitions {
+			if column.Priority != 0 && !options.Wide {
+				continue
+			}
+			headers = append(headers, strings.ToUpper(column.Name))
+		}
+		headers = append(headers, formatLabelHeaders(options.ColumnLabels)...)
+		// LABELS is always the last column.
+		headers = append(headers, formatShowLabelsHeader(options.ShowLabels)...)
+		if options.WithNamespace {
+			headers = append(withNamespacePrefixColumns, headers...)
+		}
+		printHeader(headers, output)
+	}
+
+	if !handler.printRows {
+		// TODO: this code path is deprecated and will be removed when all handlers are row printers
+		args := []reflect.Value{reflect.ValueOf(obj), reflect.ValueOf(output), reflect.ValueOf(options)}
+		resultValue := handler.printFunc.Call(args)[0]
+		if resultValue.IsNil() {
+			return nil
+		}
+		return resultValue.Interface().(error)
+	}
+
+	if results[1].IsNil() {
+		rows := results[0].Interface().([]metav1beta1.TableRow)
+		printRows(output, rows, options)
+		return nil
+	}
+	return results[1].Interface().(error)
+}
+
+// printRows writes the provided rows to output.
+func printRows(output io.Writer, rows []metav1beta1.TableRow, options PrintOptions) {
+	for _, row := range rows {
+		if options.WithNamespace {
+			if obj := row.Object.Object; obj != nil {
+				if m, err := meta.Accessor(obj); err == nil {
+					fmt.Fprint(output, m.GetNamespace())
+				}
+			}
+			fmt.Fprint(output, "\t")
+		}
+
+		for i, cell := range row.Cells {
+			if i != 0 {
+				fmt.Fprint(output, "\t")
+			} else {
+				// TODO: remove this once we drop the legacy printers
+				if options.WithKind && len(options.Kind) > 0 {
+					fmt.Fprintf(output, "%s/%s", options.Kind, cell)
+					continue
+				}
+			}
+			fmt.Fprint(output, cell)
+		}
+
+		hasLabels := len(options.ColumnLabels) > 0
+		if obj := row.Object.Object; obj != nil && (hasLabels || options.ShowLabels) {
+			if m, err := meta.Accessor(obj); err == nil {
+				for _, value := range labelValues(m.GetLabels(), options) {
+					output.Write([]byte("\t"))
+					output.Write([]byte(value))
+				}
+			}
+		}
+
+		output.Write([]byte("\n"))
+	}
+}
+
 // legacyPrinterToTable uses the old printFunc with tabbed writer to generate a table.
 // TODO: remove when all legacy printers are removed.
-func (h *HumanReadablePrinter) legacyPrinterToTable(obj runtime.Object, handler *handlerEntry) (*metav1alpha1.Table, error) {
+func (h *HumanReadablePrinter) legacyPrinterToTable(obj runtime.Object, handler *handlerEntry) (*metav1beta1.Table, error) {
 	printFunc := handler.printFunc
-	table := &metav1alpha1.Table{
+	table := &metav1beta1.Table{
 		ColumnDefinitions: handler.columnDefinitions,
 	}
 
@@ -662,7 +659,7 @@ func (h *HumanReadablePrinter) legacyPrinterToTable(obj runtime.Object, handler 
 		}
 		for len(data) > 0 {
 			cells, remainder := tabbedLineToCells(data, len(table.ColumnDefinitions))
-			table.Rows = append(table.Rows, metav1alpha1.TableRow{
+			table.Rows = append(table.Rows, metav1beta1.TableRow{
 				Cells:  cells,
 				Object: runtime.RawExtension{Object: items[i]},
 			})
@@ -677,7 +674,7 @@ func (h *HumanReadablePrinter) legacyPrinterToTable(obj runtime.Object, handler 
 		}
 		data := buf.Bytes()
 		cells, _ := tabbedLineToCells(data, len(table.ColumnDefinitions))
-		table.Rows = append(table.Rows, metav1alpha1.TableRow{
+		table.Rows = append(table.Rows, metav1beta1.TableRow{
 			Cells:  cells,
 			Object: runtime.RawExtension{Object: obj},
 		})
@@ -754,12 +751,9 @@ func formatLabelHeaders(columnLabels []string) []string {
 }
 
 // headers for --show-labels=true
-func formatShowLabelsHeader(showLabels bool, t reflect.Type) []string {
+func formatShowLabelsHeader(showLabels bool) []string {
 	if showLabels {
-		// TODO: this is all sorts of hack, fix
-		if t.String() != "*api.ThirdPartyResource" && t.String() != "*api.ThirdPartyResourceList" {
-			return []string{"LABELS"}
-		}
+		return []string{"LABELS"}
 	}
 	return nil
 }

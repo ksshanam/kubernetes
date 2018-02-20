@@ -23,12 +23,10 @@ import (
 	"strings"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/kubernetes/pkg/api/v1"
-	apiservice "k8s.io/kubernetes/pkg/api/v1/service"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	gcecloud "k8s.io/kubernetes/pkg/cloudprovider/providers/gce"
 
@@ -51,13 +49,13 @@ func MakeFirewallNameForLBService(name string) string {
 }
 
 // ConstructFirewallForLBService returns the expected GCE firewall rule for a loadbalancer type service
-func ConstructFirewallForLBService(svc *v1.Service, nodesTags []string) *compute.Firewall {
+func ConstructFirewallForLBService(svc *v1.Service, nodeTag string) *compute.Firewall {
 	if svc.Spec.Type != v1.ServiceTypeLoadBalancer {
 		Failf("can not construct firewall rule for non-loadbalancer type service")
 	}
 	fw := compute.Firewall{}
 	fw.Name = MakeFirewallNameForLBService(cloudprovider.GetLoadBalancerName(svc))
-	fw.TargetTags = nodesTags
+	fw.TargetTags = []string{nodeTag}
 	if svc.Spec.LoadBalancerSourceRanges == nil {
 		fw.SourceRanges = []string{"0.0.0.0/0"}
 	} else {
@@ -77,17 +75,17 @@ func MakeHealthCheckFirewallNameForLBService(clusterID, name string, isNodesHeal
 }
 
 // ConstructHealthCheckFirewallForLBService returns the expected GCE firewall rule for a loadbalancer type service
-func ConstructHealthCheckFirewallForLBService(clusterID string, svc *v1.Service, nodesTags []string, isNodesHealthCheck bool) *compute.Firewall {
+func ConstructHealthCheckFirewallForLBService(clusterID string, svc *v1.Service, nodeTag string, isNodesHealthCheck bool) *compute.Firewall {
 	if svc.Spec.Type != v1.ServiceTypeLoadBalancer {
 		Failf("can not construct firewall rule for non-loadbalancer type service")
 	}
 	fw := compute.Firewall{}
 	fw.Name = MakeHealthCheckFirewallNameForLBService(clusterID, cloudprovider.GetLoadBalancerName(svc), isNodesHealthCheck)
-	fw.TargetTags = nodesTags
+	fw.TargetTags = []string{nodeTag}
 	fw.SourceRanges = gcecloud.LoadBalancerSrcRanges()
 	healthCheckPort := gcecloud.GetNodesHealthCheckPort()
 	if !isNodesHealthCheck {
-		healthCheckPort = apiservice.GetServiceHealthCheckNodePort(svc)
+		healthCheckPort = svc.Spec.HealthCheckNodePort
 	}
 	fw.Allowed = []*compute.FirewallAllowed{
 		{
@@ -98,18 +96,10 @@ func ConstructHealthCheckFirewallForLBService(clusterID string, svc *v1.Service,
 	return &fw
 }
 
-// GetNodeTags gets tags from one of the Kubernetes nodes
-func GetNodeTags(c clientset.Interface, cloudConfig CloudConfig) *compute.Tags {
-	nodes := GetReadySchedulableNodesOrDie(c)
-	Expect(len(nodes.Items) > 0).Should(BeTrue())
-	nodeTags := GetInstanceTags(cloudConfig, nodes.Items[0].Name)
-	return nodeTags
-}
-
 // GetInstanceTags gets tags from GCE instance with given name.
 func GetInstanceTags(cloudConfig CloudConfig, instanceName string) *compute.Tags {
 	gceCloud := cloudConfig.Provider.(*gcecloud.GCECloud)
-	res, err := gceCloud.GetComputeService().Instances.Get(cloudConfig.ProjectID, cloudConfig.Zone,
+	res, err := gceCloud.ComputeServices().GA.Instances.Get(cloudConfig.ProjectID, cloudConfig.Zone,
 		instanceName).Do()
 	if err != nil {
 		Failf("Failed to get instance tags for %v: %v", instanceName, err)
@@ -118,18 +108,28 @@ func GetInstanceTags(cloudConfig CloudConfig, instanceName string) *compute.Tags
 }
 
 // SetInstanceTags sets tags on GCE instance with given name.
-func SetInstanceTags(cloudConfig CloudConfig, instanceName string, tags []string) []string {
+func SetInstanceTags(cloudConfig CloudConfig, instanceName, zone string, tags []string) []string {
 	gceCloud := cloudConfig.Provider.(*gcecloud.GCECloud)
 	// Re-get instance everytime because we need the latest fingerprint for updating metadata
 	resTags := GetInstanceTags(cloudConfig, instanceName)
-	_, err := gceCloud.GetComputeService().Instances.SetTags(
-		cloudConfig.ProjectID, cloudConfig.Zone, instanceName,
+	_, err := gceCloud.ComputeServices().GA.Instances.SetTags(
+		cloudConfig.ProjectID, zone, instanceName,
 		&compute.Tags{Fingerprint: resTags.Fingerprint, Items: tags}).Do()
 	if err != nil {
 		Failf("failed to set instance tags: %v", err)
 	}
 	Logf("Sent request to set tags %v on instance: %v", tags, instanceName)
 	return resTags.Items
+}
+
+// GetNodeTags gets k8s node tag from one of the nodes
+func GetNodeTags(c clientset.Interface, cloudConfig CloudConfig) []string {
+	nodes := GetReadySchedulableNodesOrDie(c)
+	if len(nodes.Items) == 0 {
+		Logf("GetNodeTags: Found 0 node.")
+		return []string{}
+	}
+	return GetInstanceTags(cloudConfig, nodes.Items[0].Name).Items
 }
 
 // GetInstancePrefix returns the INSTANCE_PREFIX env we set for e2e cluster.
@@ -149,21 +149,12 @@ func GetClusterName(instancePrefix string) string {
 	return instancePrefix
 }
 
-// GetClusterIpRange returns the CLUSTER_IP_RANGE env we set for e2e cluster.
-//
-// Warning: this MUST be consistent with the CLUSTER_IP_RANGE set in
-// gce/config-test.sh.
-func GetClusterIpRange() string {
-	return "10.100.0.0/14"
-}
-
 // GetE2eFirewalls returns all firewall rules we create for an e2e cluster.
 // From cluster/gce/util.sh, all firewall rules should be consistent with the ones created by startup scripts.
-func GetE2eFirewalls(masterName, masterTag, nodeTag, network string) []*compute.Firewall {
+func GetE2eFirewalls(masterName, masterTag, nodeTag, network, clusterIpRange string) []*compute.Firewall {
 	instancePrefix, err := GetInstancePrefix(masterName)
 	Expect(err).NotTo(HaveOccurred())
 	clusterName := GetClusterName(instancePrefix)
-	clusterIpRange := GetClusterIpRange()
 
 	fws := []*compute.Firewall{}
 	fws = append(fws, &compute.Firewall{
@@ -311,6 +302,83 @@ func PackProtocolsPortsFromFirewall(alloweds []*compute.FirewallAllowed) []strin
 	return protocolPorts
 }
 
+type portRange struct {
+	protocol string
+	min, max int
+}
+
+func toPortRange(s string) (pr portRange, err error) {
+	protoPorts := strings.Split(s, "/")
+	// Set protocol
+	pr.protocol = strings.ToUpper(protoPorts[0])
+
+	if len(protoPorts) != 2 {
+		return pr, fmt.Errorf("expected a single '/' in %q", s)
+	}
+
+	ports := strings.Split(protoPorts[1], "-")
+	switch len(ports) {
+	case 1:
+		v, err := strconv.Atoi(ports[0])
+		if err != nil {
+			return pr, err
+		}
+		pr.min, pr.max = v, v
+	case 2:
+		start, err := strconv.Atoi(ports[0])
+		if err != nil {
+			return pr, err
+		}
+		end, err := strconv.Atoi(ports[1])
+		if err != nil {
+			return pr, err
+		}
+		pr.min, pr.max = start, end
+	default:
+		return pr, fmt.Errorf("unexpected range value %q", protoPorts[1])
+	}
+
+	return pr, nil
+}
+
+// isPortsSubset asserts that the "requiredPorts" are covered by the "coverage" ports.
+// requiredPorts - must be single-port, examples: 'tcp/50', 'udp/80'.
+// coverage - single or port-range values, example: 'tcp/50', 'udp/80-1000'.
+// Returns true if every requiredPort exists in the list of coverage rules.
+func isPortsSubset(requiredPorts, coverage []string) error {
+	for _, reqPort := range requiredPorts {
+		rRange, err := toPortRange(reqPort)
+		if err != nil {
+			return err
+		}
+		if rRange.min != rRange.max {
+			return fmt.Errorf("requiring a range is not supported: %q", reqPort)
+		}
+
+		var covered bool
+		for _, c := range coverage {
+			cRange, err := toPortRange(c)
+			if err != nil {
+				return err
+			}
+
+			if rRange.protocol != cRange.protocol {
+				continue
+			}
+
+			if rRange.min >= cRange.min && rRange.min <= cRange.max {
+				covered = true
+				break
+			}
+		}
+
+		if !covered {
+			return fmt.Errorf("%q is not covered by %v", reqPort, coverage)
+		}
+	}
+	return nil
+}
+
 // SameStringArray verifies whether two string arrays have the same strings, return error if not.
 // Order does not matter.
 // When `include` is set to true, verifies whether result includes all elements from expected.
@@ -343,10 +411,19 @@ func VerifyFirewallRule(res, exp *compute.Firewall, network string, portsSubset 
 	if !strings.HasSuffix(res.Network, "/"+network) {
 		return fmt.Errorf("incorrect network: %v, expected ends with: %v", res.Network, "/"+network)
 	}
-	if err := SameStringArray(PackProtocolsPortsFromFirewall(res.Allowed),
-		PackProtocolsPortsFromFirewall(exp.Allowed), portsSubset); err != nil {
-		return fmt.Errorf("incorrect allowed protocols ports: %v", err)
+
+	actualPorts := PackProtocolsPortsFromFirewall(res.Allowed)
+	expPorts := PackProtocolsPortsFromFirewall(exp.Allowed)
+	if portsSubset {
+		if err := isPortsSubset(expPorts, actualPorts); err != nil {
+			return fmt.Errorf("incorrect allowed protocol ports: %v", err)
+		}
+	} else {
+		if err := SameStringArray(actualPorts, expPorts, false); err != nil {
+			return fmt.Errorf("incorrect allowed protocols ports: %v", err)
+		}
 	}
+
 	if err := SameStringArray(res.SourceRanges, exp.SourceRanges, false); err != nil {
 		return fmt.Errorf("incorrect source ranges %v, expected %v: %v", res.SourceRanges, exp.SourceRanges, err)
 	}
@@ -378,20 +455,4 @@ func WaitForFirewallRule(gceCloud *gcecloud.GCECloud, fwName string, exist bool,
 		return nil, fmt.Errorf("error waiting for firewall %v exist=%v", fwName, exist)
 	}
 	return fw, nil
-}
-
-func GetClusterID(c clientset.Interface) (string, error) {
-	cm, err := c.Core().ConfigMaps(metav1.NamespaceSystem).Get(gcecloud.UIDConfigMapName, metav1.GetOptions{})
-	if err != nil || cm == nil {
-		return "", fmt.Errorf("error getting cluster ID: %v", err)
-	}
-	clusterID, clusterIDExists := cm.Data[gcecloud.UIDCluster]
-	providerID, providerIDExists := cm.Data[gcecloud.UIDProvider]
-	if !clusterIDExists {
-		return "", fmt.Errorf("cluster ID not set")
-	}
-	if providerIDExists {
-		return providerID, nil
-	}
-	return clusterID, nil
 }

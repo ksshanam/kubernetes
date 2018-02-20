@@ -19,6 +19,7 @@ package winuserspace
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,14 +30,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/helper"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/helper"
 	"k8s.io/kubernetes/pkg/proxy"
 	"k8s.io/kubernetes/pkg/util/netsh"
 )
 
 const allAvailableInterfaces string = ""
-const stickyMaxAgeMinutes int = 180 // TODO: parameterize this in the API.
 
 type portal struct {
 	ip         string
@@ -104,7 +104,7 @@ type portMapKey struct {
 }
 
 func (k *portMapKey) String() string {
-	return fmt.Sprintf("%s:%d/%s", k.ip, k.port, k.protocol)
+	return fmt.Sprintf("%s/%s", net.JoinHostPort(k.ip, strconv.Itoa(k.port)), k.protocol)
 }
 
 // A value for the portMap
@@ -122,22 +122,14 @@ var (
 	ErrProxyOnLocalhost = fmt.Errorf("cannot proxy on localhost")
 )
 
-// IsProxyLocked returns true if the proxy could not acquire the lock on iptables.
-func IsProxyLocked(err error) bool {
-	return strings.Contains(err.Error(), "holding the xtables lock")
-}
-
 // Used below.
 var localhostIPv4 = net.ParseIP("127.0.0.1")
 var localhostIPv6 = net.ParseIP("::1")
 
 // NewProxier returns a new Proxier given a LoadBalancer and an address on
-// which to listen.  Because of the iptables logic, It is assumed that there
-// is only a single Proxier active on a machine. An error will be returned if
-// the proxier cannot be started due to an invalid ListenIP (loopback) or
-// if iptables fails to update or acquire the initial lock. Once a proxier is
-// created, it will keep iptables up to date in the background and will not
-// terminate if a particular iptables call fails.
+// which to listen. It is assumed that there is only a single Proxier active
+// on a machine. An error will be returned if the proxier cannot be started
+// due to an invalid ListenIP (loopback)
 func NewProxier(loadBalancer LoadBalancer, listenIP net.IP, netsh netsh.Interface, pr utilnet.PortRange, syncPeriod, udpIdleTimeout time.Duration) (*Proxier, error) {
 	if listenIP.Equal(localhostIPv4) || listenIP.Equal(localhostIPv6) {
 		return nil, ErrProxyOnLocalhost
@@ -148,7 +140,7 @@ func NewProxier(loadBalancer LoadBalancer, listenIP net.IP, netsh netsh.Interfac
 		return nil, fmt.Errorf("failed to select a host interface: %v", err)
 	}
 
-	glog.V(2).Infof("Setting proxy IP to %v and initializing iptables", hostIP)
+	glog.V(2).Infof("Setting proxy IP to %v", hostIP)
 	return createProxier(loadBalancer, listenIP, netsh, hostIP, syncPeriod, udpIdleTimeout)
 }
 
@@ -242,7 +234,7 @@ func (proxier *Proxier) addServicePortPortal(servicePortPortalName ServicePortPo
 		if existed, err := proxier.netsh.EnsureIPAddress(args, serviceIP); err != nil {
 			return nil, err
 		} else if !existed {
-			glog.V(3).Infof("Added ip address to fowarder interface for service %q at %s:%d/%s", servicePortPortalName, listenIP, port, protocol)
+			glog.V(3).Infof("Added ip address to fowarder interface for service %q at %s/%s", servicePortPortalName, net.JoinHostPort(listenIP, strconv.Itoa(port)), protocol)
 		}
 	}
 
@@ -267,7 +259,7 @@ func (proxier *Proxier) addServicePortPortal(servicePortPortalName ServicePortPo
 	}
 	proxier.setServiceInfo(servicePortPortalName, si)
 
-	glog.V(2).Infof("Proxying for service %q at %s:%d/%s", servicePortPortalName, listenIP, port, protocol)
+	glog.V(2).Infof("Proxying for service %q at %s/%s", servicePortPortalName, net.JoinHostPort(listenIP, strconv.Itoa(port)), protocol)
 	go func(service ServicePortPortalName, proxier *Proxier) {
 		defer runtime.HandleCrash()
 		atomic.AddInt32(&proxier.numProxyLoops, 1)
@@ -350,7 +342,7 @@ func (proxier *Proxier) mergeService(service *api.Service) map[ServicePortPortal
 					glog.Errorf("Failed to close service port portal %q: %v", servicePortPortalName, err)
 				}
 			}
-			glog.V(1).Infof("Adding new service %q at %s:%d/%s", servicePortPortalName, listenIP, listenPort, protocol)
+			glog.V(1).Infof("Adding new service %q at %s/%s", servicePortPortalName, net.JoinHostPort(listenIP, strconv.Itoa(listenPort)), protocol)
 			info, err := proxier.addServicePortPortal(servicePortPortalName, protocol, listenIP, listenPort, proxier.udpIdleTimeout)
 			if err != nil {
 				glog.Errorf("Failed to start proxy for %q: %v", servicePortPortalName, err)
@@ -368,7 +360,11 @@ func (proxier *Proxier) mergeService(service *api.Service) map[ServicePortPortal
 				},
 				Port: servicePort.Name,
 			}
-			proxier.loadBalancer.NewService(servicePortName, service.Spec.SessionAffinity, stickyMaxAgeMinutes)
+			timeoutSeconds := 0
+			if service.Spec.SessionAffinity == api.ServiceAffinityClientIP {
+				timeoutSeconds = int(*service.Spec.SessionAffinityConfig.ClientIP.TimeoutSeconds)
+			}
+			proxier.loadBalancer.NewService(servicePortName, service.Spec.SessionAffinity, timeoutSeconds)
 		}
 	}
 

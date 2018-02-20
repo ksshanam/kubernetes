@@ -23,11 +23,11 @@ import (
 	"reflect"
 	"testing"
 
+	apps "k8s.io/api/apps/v1"
+	"k8s.io/api/core/v1"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/kubernetes/pkg/api/testapi"
-	"k8s.io/kubernetes/pkg/api/v1"
-	apps "k8s.io/kubernetes/pkg/apis/apps/v1beta1"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset/fake"
-	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/externalversions"
 	"k8s.io/kubernetes/pkg/controller"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -56,7 +56,7 @@ func TestRealHistory_ListControllerRevisions(t *testing.T) {
 		stop := make(chan struct{})
 		defer close(stop)
 		informerFactory.Start(stop)
-		informer := informerFactory.Apps().V1beta1().ControllerRevisions()
+		informer := informerFactory.Apps().V1().ControllerRevisions()
 		informerFactory.WaitForCacheSync(stop)
 		for i := range test.revisions {
 			informer.Informer().GetIndexer().Add(test.revisions[i])
@@ -85,22 +85,22 @@ func TestRealHistory_ListControllerRevisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev2.Namespace = ss1.Namespace
-	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1)
+	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss2Rev1.Namespace = ss2.Namespace
-	ss1Orphan, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 3)
+	ss1Orphan, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 3, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestFakeHistory_ListControllerRevisions(t *testing.T) {
 		stop := make(chan struct{})
 		defer close(stop)
 		informerFactory.Start(stop)
-		informer := informerFactory.Apps().V1beta1().ControllerRevisions()
+		informer := informerFactory.Apps().V1().ControllerRevisions()
 		informerFactory.WaitForCacheSync(stop)
 		for i := range test.revisions {
 			informer.Informer().GetIndexer().Add(test.revisions[i])
@@ -186,22 +186,22 @@ func TestFakeHistory_ListControllerRevisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev2.Namespace = ss1.Namespace
-	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1)
+	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss2Rev1.Namespace = ss2.Namespace
-	ss1Orphan, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 3)
+	ss1Orphan, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 3, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,33 +257,53 @@ func TestRealHistory_CreateControllerRevision(t *testing.T) {
 	testFn := func(test *testcase, t *testing.T) {
 		client := fake.NewSimpleClientset()
 		informerFactory := informers.NewSharedInformerFactory(client, controller.NoResyncPeriodFunc())
-
 		stop := make(chan struct{})
 		defer close(stop)
 		informerFactory.Start(stop)
-		informer := informerFactory.Apps().V1beta1().ControllerRevisions()
+		informer := informerFactory.Apps().V1().ControllerRevisions()
 		informerFactory.WaitForCacheSync(stop)
 		history := NewHistory(client, informer.Lister())
+
+		var collisionCount int32
 		for i := range test.existing {
-			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision)
+			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision, &collisionCount)
 			if err != nil {
 				t.Fatal(err)
 			}
 		}
-		created, err := history.CreateControllerRevision(test.parent, test.revision)
+		// Clear collisionCount before creating the test revision
+		collisionCount = 0
+		created, err := history.CreateControllerRevision(test.parent, test.revision, &collisionCount)
 		if err != nil {
 			t.Errorf("%s: %s", test.name, err)
 		}
-		if test.rename && created.Name == test.revision.Name {
-			t.Errorf("%s: wanted rename got %s %s", test.name, created.Name, test.revision.Name)
 
+		if test.rename {
+			if created.Name == test.revision.Name {
+				t.Errorf("%s: wanted rename got %s %s", test.name, created.Name, test.revision.Name)
+			}
+			expectedName := ControllerRevisionName(test.parent.GetName(), HashControllerRevision(test.revision, &collisionCount))
+			if created.Name != expectedName {
+				t.Errorf("%s: on name collision wanted new name %s got %s", test.name, expectedName, created.Name)
+			}
+
+			// Second name collision should have incremented collisionCount to 2
+			_, err = history.CreateControllerRevision(test.parent, test.revision, &collisionCount)
+			if err != nil {
+				t.Errorf("%s: %s", test.name, err)
+			}
+			if collisionCount != 2 {
+				t.Errorf("%s: on second name collision wanted collisionCount 1 got %d", test.name, collisionCount)
+			}
 		}
 		if !test.rename && created.Name != test.revision.Name {
 			t.Errorf("%s: wanted %s got %s", test.name, test.revision.Name, created.Name)
 		}
 	}
 	ss1 := newStatefulSet(3, "ss1", types.UID("ss1"), map[string]string{"foo": "bar"})
+	ss1.Status.CollisionCount = new(int32)
 	ss2 := newStatefulSet(3, "ss2", types.UID("ss2"), map[string]string{"goo": "car"})
+	ss2.Status.CollisionCount = new(int32)
 	sel1, err := metav1.LabelSelectorAsSelector(ss1.Spec.Selector)
 	if err != nil {
 		t.Fatal(err)
@@ -292,17 +312,17 @@ func TestRealHistory_CreateControllerRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev2.Namespace = ss1.Namespace
-	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1)
+	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1, ss2.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,29 +391,50 @@ func TestFakeHistory_CreateControllerRevision(t *testing.T) {
 		stop := make(chan struct{})
 		defer close(stop)
 		informerFactory.Start(stop)
-		informer := informerFactory.Apps().V1beta1().ControllerRevisions()
+		informer := informerFactory.Apps().V1().ControllerRevisions()
 		informerFactory.WaitForCacheSync(stop)
 		history := NewFakeHistory(informer)
+
+		var collisionCount int32
 		for i := range test.existing {
-			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision)
+			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision, &collisionCount)
 			if err != nil {
 				t.Fatal(err)
 			}
 		}
-		created, err := history.CreateControllerRevision(test.parent, test.revision)
+		// Clear collisionCount before creating the test revision
+		collisionCount = 0
+		created, err := history.CreateControllerRevision(test.parent, test.revision, &collisionCount)
 		if err != nil {
 			t.Errorf("%s: %s", test.name, err)
 		}
-		if test.rename && created.Name == test.revision.Name {
-			t.Errorf("%s: wanted rename got %s %s", test.name, created.Name, test.revision.Name)
 
+		if test.rename {
+			if created.Name == test.revision.Name {
+				t.Errorf("%s: wanted rename got %s %s", test.name, created.Name, test.revision.Name)
+			}
+			expectedName := ControllerRevisionName(test.parent.GetName(), HashControllerRevision(test.revision, &collisionCount))
+			if created.Name != expectedName {
+				t.Errorf("%s: on name collision wanted new name %s got %s", test.name, expectedName, created.Name)
+			}
+
+			// Second name collision should have incremented collisionCount to 2
+			_, err = history.CreateControllerRevision(test.parent, test.revision, &collisionCount)
+			if err != nil {
+				t.Errorf("%s: %s", test.name, err)
+			}
+			if collisionCount != 2 {
+				t.Errorf("%s: on second name collision wanted collisionCount 1 got %d", test.name, collisionCount)
+			}
 		}
 		if !test.rename && created.Name != test.revision.Name {
 			t.Errorf("%s: wanted %s got %s", test.name, test.revision.Name, created.Name)
 		}
 	}
 	ss1 := newStatefulSet(3, "ss1", types.UID("ss1"), map[string]string{"foo": "bar"})
+	ss1.Status.CollisionCount = new(int32)
 	ss2 := newStatefulSet(3, "ss2", types.UID("ss2"), map[string]string{"goo": "car"})
+	ss2.Status.CollisionCount = new(int32)
 	sel1, err := metav1.LabelSelectorAsSelector(ss1.Spec.Selector)
 	if err != nil {
 		t.Fatal(err)
@@ -402,17 +443,17 @@ func TestFakeHistory_CreateControllerRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev2.Namespace = ss1.Namespace
-	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1)
+	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1, ss2.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,11 +549,12 @@ func TestRealHistory_UpdateControllerRevision(t *testing.T) {
 		stop := make(chan struct{})
 		defer close(stop)
 		informerFactory.Start(stop)
-		informer := informerFactory.Apps().V1beta1().ControllerRevisions()
+		informer := informerFactory.Apps().V1().ControllerRevisions()
 		informerFactory.WaitForCacheSync(stop)
 		history := NewHistory(client, informer.Lister())
+		var collisionCount int32
 		for i := range test.existing {
-			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision)
+			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision, &collisionCount)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -532,17 +574,18 @@ func TestRealHistory_UpdateControllerRevision(t *testing.T) {
 		}
 	}
 	ss1 := newStatefulSet(3, "ss1", types.UID("ss1"), map[string]string{"foo": "bar"})
+	ss1.Status.CollisionCount = new(int32)
 	sel1, err := metav1.LabelSelectorAsSelector(ss1.Spec.Selector)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,11 +681,12 @@ func TestFakeHistory_UpdateControllerRevision(t *testing.T) {
 		stop := make(chan struct{})
 		defer close(stop)
 		informerFactory.Start(stop)
-		informer := informerFactory.Apps().V1beta1().ControllerRevisions()
+		informer := informerFactory.Apps().V1().ControllerRevisions()
 		informerFactory.WaitForCacheSync(stop)
 		history := NewFakeHistory(informer)
+		var collisionCount int32
 		for i := range test.existing {
-			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision)
+			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision, &collisionCount)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -659,17 +703,18 @@ func TestFakeHistory_UpdateControllerRevision(t *testing.T) {
 		}
 	}
 	ss1 := newStatefulSet(3, "ss1", types.UID("ss1"), map[string]string{"foo": "bar"})
+	ss1.Status.CollisionCount = new(int32)
 	sel1, err := metav1.LabelSelectorAsSelector(ss1.Spec.Selector)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -728,11 +773,12 @@ func TestRealHistory_DeleteControllerRevision(t *testing.T) {
 		stop := make(chan struct{})
 		defer close(stop)
 		informerFactory.Start(stop)
-		informer := informerFactory.Apps().V1beta1().ControllerRevisions()
+		informer := informerFactory.Apps().V1().ControllerRevisions()
 		informerFactory.WaitForCacheSync(stop)
 		history := NewHistory(client, informer.Lister())
+		var collisionCount int32
 		for i := range test.existing {
-			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision)
+			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision, &collisionCount)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -746,7 +792,9 @@ func TestRealHistory_DeleteControllerRevision(t *testing.T) {
 		}
 	}
 	ss1 := newStatefulSet(3, "ss1", types.UID("ss1"), map[string]string{"foo": "bar"})
+	ss1.Status.CollisionCount = new(int32)
 	ss2 := newStatefulSet(3, "ss2", types.UID("ss2"), map[string]string{"goo": "car"})
+	ss2.Status.CollisionCount = new(int32)
 	sel1, err := metav1.LabelSelectorAsSelector(ss1.Spec.Selector)
 	if err != nil {
 		t.Fatal(err)
@@ -755,22 +803,22 @@ func TestRealHistory_DeleteControllerRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev2.Namespace = ss1.Namespace
-	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1)
+	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1, ss2.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss2Rev1.Namespace = ss2.Namespace
-	ss2Rev2, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 2)
+	ss2Rev2, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 2, ss2.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -836,11 +884,12 @@ func TestFakeHistory_DeleteControllerRevision(t *testing.T) {
 		stop := make(chan struct{})
 		defer close(stop)
 		informerFactory.Start(stop)
-		informer := informerFactory.Apps().V1beta1().ControllerRevisions()
+		informer := informerFactory.Apps().V1().ControllerRevisions()
 		informerFactory.WaitForCacheSync(stop)
 		history := NewFakeHistory(informer)
+		var collisionCount int32
 		for i := range test.existing {
-			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision)
+			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision, &collisionCount)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -854,7 +903,9 @@ func TestFakeHistory_DeleteControllerRevision(t *testing.T) {
 		}
 	}
 	ss1 := newStatefulSet(3, "ss1", types.UID("ss1"), map[string]string{"foo": "bar"})
+	ss1.Status.CollisionCount = new(int32)
 	ss2 := newStatefulSet(3, "ss2", types.UID("ss2"), map[string]string{"goo": "car"})
+	ss2.Status.CollisionCount = new(int32)
 	sel1, err := metav1.LabelSelectorAsSelector(ss1.Spec.Selector)
 	if err != nil {
 		t.Fatal(err)
@@ -863,22 +914,22 @@ func TestFakeHistory_DeleteControllerRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev2.Namespace = ss1.Namespace
-	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1)
+	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1, ss2.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss2Rev1.Namespace = ss2.Namespace
-	ss2Rev2, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 2)
+	ss2Rev2, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 2, ss2.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -978,12 +1029,13 @@ func TestRealHistory_AdoptControllerRevision(t *testing.T) {
 		stop := make(chan struct{})
 		defer close(stop)
 		informerFactory.Start(stop)
-		informer := informerFactory.Apps().V1beta1().ControllerRevisions()
+		informer := informerFactory.Apps().V1().ControllerRevisions()
 		informerFactory.WaitForCacheSync(stop)
 
 		history := NewHistory(client, informer.Lister())
+		var collisionCount int32
 		for i := range test.existing {
-			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision)
+			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision, &collisionCount)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -992,7 +1044,7 @@ func TestRealHistory_AdoptControllerRevision(t *testing.T) {
 		if !test.err && err != nil {
 			t.Errorf("%s: %s", test.name, err)
 		}
-		if !test.err && controller.GetControllerOf(adopted).UID != test.parent.GetUID() {
+		if !test.err && !metav1.IsControlledBy(adopted, test.parent) {
 			t.Errorf("%s: adoption failed", test.name)
 		}
 		if test.err && err == nil {
@@ -1001,7 +1053,9 @@ func TestRealHistory_AdoptControllerRevision(t *testing.T) {
 	}
 
 	ss1 := newStatefulSet(3, "ss1", types.UID("ss1"), map[string]string{"foo": "bar"})
+	ss1.Status.CollisionCount = new(int32)
 	ss2 := newStatefulSet(3, "ss2", types.UID("ss2"), map[string]string{"goo": "car"})
+	ss2.Status.CollisionCount = new(int32)
 	sel1, err := metav1.LabelSelectorAsSelector(ss1.Spec.Selector)
 	if err != nil {
 		t.Fatal(err)
@@ -1010,18 +1064,18 @@ func TestRealHistory_AdoptControllerRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev2.Namespace = ss1.Namespace
 	ss1Rev2.OwnerReferences = []metav1.OwnerReference{}
-	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1)
+	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1, ss2.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1089,12 +1143,13 @@ func TestFakeHistory_AdoptControllerRevision(t *testing.T) {
 		stop := make(chan struct{})
 		defer close(stop)
 		informerFactory.Start(stop)
-		informer := informerFactory.Apps().V1beta1().ControllerRevisions()
+		informer := informerFactory.Apps().V1().ControllerRevisions()
 		informerFactory.WaitForCacheSync(stop)
 
 		history := NewFakeHistory(informer)
+		var collisionCount int32
 		for i := range test.existing {
-			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision)
+			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision, &collisionCount)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1103,7 +1158,7 @@ func TestFakeHistory_AdoptControllerRevision(t *testing.T) {
 		if !test.err && err != nil {
 			t.Errorf("%s: %s", test.name, err)
 		}
-		if !test.err && controller.GetControllerOf(adopted).UID != test.parent.GetUID() {
+		if !test.err && !metav1.IsControlledBy(adopted, test.parent) {
 			t.Errorf("%s: adoption failed", test.name)
 		}
 		if test.err && err == nil {
@@ -1112,7 +1167,9 @@ func TestFakeHistory_AdoptControllerRevision(t *testing.T) {
 	}
 
 	ss1 := newStatefulSet(3, "ss1", types.UID("ss1"), map[string]string{"foo": "bar"})
+	ss1.Status.CollisionCount = new(int32)
 	ss2 := newStatefulSet(3, "ss2", types.UID("ss2"), map[string]string{"goo": "car"})
+	ss2.Status.CollisionCount = new(int32)
 	sel1, err := metav1.LabelSelectorAsSelector(ss1.Spec.Selector)
 	if err != nil {
 		t.Fatal(err)
@@ -1121,18 +1178,18 @@ func TestFakeHistory_AdoptControllerRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev2.Namespace = ss1.Namespace
 	ss1Rev2.OwnerReferences = []metav1.OwnerReference{}
-	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1)
+	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1, ss2.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1211,8 +1268,7 @@ func TestRealHistory_ReleaseControllerRevision(t *testing.T) {
 				if found == nil {
 					return true, nil, errors.NewNotFound(apps.Resource("controllerrevisions"), test.revision.Name)
 				}
-				if foundParent := controller.GetControllerOf(test.revision); foundParent == nil ||
-					foundParent.UID != test.parent.GetUID() {
+				if !metav1.IsControlledBy(test.revision, test.parent) {
 					return true, nil, errors.NewInvalid(
 						test.revision.GroupVersionKind().GroupKind(), test.revision.Name, nil)
 				}
@@ -1240,12 +1296,13 @@ func TestRealHistory_ReleaseControllerRevision(t *testing.T) {
 		stop := make(chan struct{})
 		defer close(stop)
 		informerFactory.Start(stop)
-		informer := informerFactory.Apps().V1beta1().ControllerRevisions()
+		informer := informerFactory.Apps().V1().ControllerRevisions()
 		informerFactory.WaitForCacheSync(stop)
 
 		history := NewHistory(client, informer.Lister())
+		var collisionCount int32
 		for i := range test.existing {
-			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision)
+			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision, &collisionCount)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1258,7 +1315,7 @@ func TestRealHistory_ReleaseControllerRevision(t *testing.T) {
 			if adopted == nil {
 				return
 			}
-			if owner := controller.GetControllerOf(adopted); owner != nil && owner.UID == test.parent.GetUID() {
+			if metav1.IsControlledBy(adopted, test.parent) {
 				t.Errorf("%s: release failed", test.name)
 			}
 		}
@@ -1277,18 +1334,18 @@ func TestRealHistory_ReleaseControllerRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev2.Namespace = ss1.Namespace
 	ss1Rev2.OwnerReferences = []metav1.OwnerReference{}
-	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1)
+	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1369,11 +1426,12 @@ func TestFakeHistory_ReleaseControllerRevision(t *testing.T) {
 		stop := make(chan struct{})
 		defer close(stop)
 		informerFactory.Start(stop)
-		informer := informerFactory.Apps().V1beta1().ControllerRevisions()
+		informer := informerFactory.Apps().V1().ControllerRevisions()
 		informerFactory.WaitForCacheSync(stop)
 		history := NewFakeHistory(informer)
+		var collisionCount int32
 		for i := range test.existing {
-			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision)
+			_, err := history.CreateControllerRevision(test.existing[i].parent, test.existing[i].revision, &collisionCount)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1386,7 +1444,7 @@ func TestFakeHistory_ReleaseControllerRevision(t *testing.T) {
 			if adopted == nil {
 				return
 			}
-			if owner := controller.GetControllerOf(adopted); owner != nil && owner.UID == test.parent.GetUID() {
+			if metav1.IsControlledBy(adopted, test.parent) {
 				t.Errorf("%s: release failed", test.name)
 			}
 		}
@@ -1396,7 +1454,9 @@ func TestFakeHistory_ReleaseControllerRevision(t *testing.T) {
 	}
 
 	ss1 := newStatefulSet(3, "ss1", types.UID("ss1"), map[string]string{"foo": "bar"})
+	ss1.Status.CollisionCount = new(int32)
 	ss2 := newStatefulSet(3, "ss2", types.UID("ss2"), map[string]string{"goo": "car"})
+	ss2.Status.CollisionCount = new(int32)
 	sel1, err := metav1.LabelSelectorAsSelector(ss1.Spec.Selector)
 	if err != nil {
 		t.Fatal(err)
@@ -1405,18 +1465,18 @@ func TestFakeHistory_ReleaseControllerRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev2.Namespace = ss1.Namespace
 	ss1Rev2.OwnerReferences = []metav1.OwnerReference{}
-	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1)
+	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1, ss2.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1500,7 +1560,9 @@ func TestFindEqualRevisions(t *testing.T) {
 		}
 	}
 	ss1 := newStatefulSet(3, "ss1", types.UID("ss1"), map[string]string{"foo": "bar"})
+	ss1.Status.CollisionCount = new(int32)
 	ss2 := newStatefulSet(3, "ss2", types.UID("ss2"), map[string]string{"goo": "car"})
+	ss2.Status.CollisionCount = new(int32)
 	sel1, err := metav1.LabelSelectorAsSelector(ss1.Spec.Selector)
 	if err != nil {
 		t.Fatal(err)
@@ -1509,23 +1571,23 @@ func TestFindEqualRevisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev2.Namespace = ss1.Namespace
 	ss1Rev2.OwnerReferences = []metav1.OwnerReference{}
-	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1)
+	ss2Rev1, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 1, ss2.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss2Rev1.Namespace = ss2.Namespace
-	ss2Rev2, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 2)
+	ss2Rev2, err := NewControllerRevision(ss2, parentKind, sel2, rawTemplate(&ss2.Spec.Template), 2, ss2.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1570,22 +1632,23 @@ func TestSortControllerRevisions(t *testing.T) {
 		}
 	}
 	ss1 := newStatefulSet(3, "ss1", types.UID("ss1"), map[string]string{"foo": "bar"})
+	ss1.Status.CollisionCount = new(int32)
 	sel1, err := metav1.LabelSelectorAsSelector(ss1.Spec.Selector)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1)
+	ss1Rev1, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 1, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev1.Namespace = ss1.Namespace
-	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev2, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ss1Rev2.Namespace = ss1.Namespace
-	ss1Rev3, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2)
+	ss1Rev3, err := NewControllerRevision(ss1, parentKind, sel1, rawTemplate(&ss1.Spec.Template), 2, ss1.Status.CollisionCount)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1622,7 +1685,7 @@ func newStatefulSet(replicas int, name string, uid types.UID, labels map[string]
 	return &apps.StatefulSet{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "StatefulSet",
-			APIVersion: "apps/v1beta1",
+			APIVersion: "apps/v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,

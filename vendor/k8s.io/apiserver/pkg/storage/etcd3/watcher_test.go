@@ -19,7 +19,6 @@ package etcd3
 import (
 	"fmt"
 	"reflect"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -186,7 +185,7 @@ func TestWatchFromZero(t *testing.T) {
 	}
 
 	// Compact previous versions
-	revToCompact, err := strconv.Atoi(out.ResourceVersion)
+	revToCompact, err := store.versioner.ParseListResourceVersion(out.ResourceVersion)
 	if err != nil {
 		t.Fatalf("Error converting %q to an int: %v", storedObj.ResourceVersion, err)
 	}
@@ -226,13 +225,13 @@ func TestWatchError(t *testing.T) {
 	codec := &testCodec{apitesting.TestCodec(codecs, examplev1.SchemeGroupVersion)}
 	cluster := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer cluster.Terminate(t)
-	invalidStore := newStore(cluster.RandClient(), false, codec, "", prefixTransformer{prefix: []byte("test!")})
+	invalidStore := newStore(cluster.RandClient(), false, true, codec, "", prefixTransformer{prefix: []byte("test!")})
 	ctx := context.Background()
 	w, err := invalidStore.Watch(ctx, "/abc", "0", storage.Everything)
 	if err != nil {
 		t.Fatalf("Watch failed: %v", err)
 	}
-	validStore := newStore(cluster.RandClient(), false, codec, "", prefixTransformer{prefix: []byte("test!")})
+	validStore := newStore(cluster.RandClient(), false, true, codec, "", prefixTransformer{prefix: []byte("test!")})
 	validStore.GuaranteedUpdate(ctx, "/abc", &example.Pod{}, true, nil, storage.SimpleUpdate(
 		func(runtime.Object) (runtime.Object, error) {
 			return &example.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}}, nil
@@ -305,7 +304,7 @@ func TestWatchDeleteEventObjectHaveLatestRV(t *testing.T) {
 	var wres clientv3.WatchResponse
 	wres = <-etcdW
 
-	watchedDeleteRev, err := storage.ParseWatchResourceVersion(watchedDeleteObj.ResourceVersion)
+	watchedDeleteRev, err := store.versioner.ParseWatchResourceVersion(watchedDeleteObj.ResourceVersion)
 	if err != nil {
 		t.Fatalf("ParseWatchResourceVersion failed: %v", err)
 	}

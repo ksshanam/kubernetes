@@ -20,15 +20,20 @@ spec:
       annotations:
         scheduler.alpha.kubernetes.io/critical-pod: ''
     spec:
+      priorityClassName: system-node-critical
       nodeSelector:
         projectcalico.org/ds-ready: "true"
       hostNetwork: true
+      serviceAccountName: calico
+      # Minimize downtime during a rolling upgrade or deletion; tell Kubernetes to do a "force
+      # deletion": https://kubernetes.io/docs/concepts/workloads/pods/pod/#termination-of-pods.
+      terminationGracePeriodSeconds: 0
       containers:
         # Runs calico/node container on each Kubernetes node.  This
         # container programs network policy and routes on each
         # host.
         - name: calico-node
-          image: calico/node:v1.3.0
+          image: gcr.io/projectcalico-org/node:v2.6.7
           env:
             - name: CALICO_DISABLE_FILE_LOGGING
               value: "true"
@@ -46,6 +51,8 @@ spec:
               value: "none"
             - name: FELIX_PROMETHEUSMETRICSENABLED
               value: "true"
+            - name: FELIX_HEALTHENABLED
+              value: "true"
             - name: IP
               value: ""
             - name: NO_DEFAULT_POOLS
@@ -58,9 +65,18 @@ spec:
               value: "true"
           securityContext:
             privileged: true
-          resources:
-            requests:
-              cpu: __CALICO_NODE_CPU__
+          livenessProbe:
+            httpGet:
+              path: /liveness
+              port: 9099
+            periodSeconds: 10
+            initialDelaySeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: 9099
+            periodSeconds: 10
           volumeMounts:
             - mountPath: /lib/modules
               name: lib-modules
@@ -71,7 +87,7 @@ spec:
         # This container installs the Calico CNI binaries
         # and CNI network config file on each node.
         - name: install-cni
-          image: calico/cni:v1.9.1
+          image: gcr.io/projectcalico-org/cni:v1.11.2
           command: ["/install-cni.sh"]
           env:
             - name: CNI_CONF_NAME
@@ -103,7 +119,7 @@ spec:
                     {
                       "type": "portmap",
                       "capabilities": {"portMappings": true},
-                      "noSnat": true
+                      "snat": true
                     }
                   ]
                 }
@@ -134,5 +150,10 @@ spec:
           hostPath:
             path: /etc/cni/net.d
       tolerations:
-        - key: "CriticalAddonsOnly"
-          operator: "Exists"
+        # Make sure calico/node gets scheduled on all nodes.
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+        - key: CriticalAddonsOnly
+          operator: Exists

@@ -7,10 +7,13 @@ reviewers:
   - lavalamp
   - spxtr
   - zmerlynn
+  - sttts
+  - gmarek
+  - vishh
 approvers:
+  - cblecker
   - deads2k
   - eparis
-  - fabianofranz
   - fejta
   - ixdy
   - jbeda
@@ -20,3 +23,7 @@ approvers:
   - shashidharatd
   - spxtr
   - zmerlynn
+  - sttts
+  - gmarek
+  - vishh
+  - liggitt

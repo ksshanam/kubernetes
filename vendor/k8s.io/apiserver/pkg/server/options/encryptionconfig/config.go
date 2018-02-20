@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/storage/value"
 	aestransformer "k8s.io/apiserver/pkg/storage/value/encrypt/aes"
+	"k8s.io/apiserver/pkg/storage/value/encrypt/envelope"
 	"k8s.io/apiserver/pkg/storage/value/encrypt/identity"
 	"k8s.io/apiserver/pkg/storage/value/encrypt/secretbox"
 )
@@ -38,6 +39,7 @@ const (
 	aesCBCTransformerPrefixV1    = "k8s:enc:aescbc:v1:"
 	aesGCMTransformerPrefixV1    = "k8s:enc:aesgcm:v1:"
 	secretboxTransformerPrefixV1 = "k8s:enc:secretbox:v1:"
+	kmsTransformerPrefixV1       = "k8s:enc:kms:v1:"
 )
 
 // GetTransformerOverrides returns the transformer overrides by reading and parsing the encryption provider configuration file
@@ -68,11 +70,11 @@ func ParseEncryptionConfiguration(f io.Reader) (map[schema.GroupResource]value.T
 		return nil, fmt.Errorf("error while parsing file: %v", err)
 	}
 
-	if config.Kind != "EncryptionConfig" && config.Kind != "" {
-		return nil, fmt.Errorf("invalid configuration kind %q provided", config.Kind)
-	}
 	if config.Kind == "" {
 		return nil, fmt.Errorf("invalid configuration file, missing Kind")
+	}
+	if config.Kind != "EncryptionConfig" {
+		return nil, fmt.Errorf("invalid configuration kind %q provided", config.Kind)
 	}
 	// TODO config.APIVersion is unchecked
 
@@ -100,7 +102,10 @@ func ParseEncryptionConfiguration(f io.Reader) (map[schema.GroupResource]value.T
 	return result, nil
 }
 
-// GetPrefixTransformer constructs and returns the appropriate prefix transformers for the passed resource using its configuration
+// The factory to create kms service. This is to make writing test easier.
+var envelopeServiceFactory = envelope.NewGRPCService
+
+// GetPrefixTransformers constructs and returns the appropriate prefix transformers for the passed resource using its configuration
 func GetPrefixTransformers(config *ResourceConfig) ([]value.PrefixTransformer, error) {
 	var result []value.PrefixTransformer
 	for _, provider := range config.Providers {
@@ -144,19 +149,39 @@ func GetPrefixTransformers(config *ResourceConfig) ([]value.PrefixTransformer, e
 			found = true
 		}
 
+		if provider.KMS != nil {
+			if found == true {
+				return nil, fmt.Errorf("more than one provider specified in a single element, should split into different list elements")
+			}
+
+			// Ensure the endpoint is provided.
+			if len(provider.KMS.Endpoint) == 0 {
+				return nil, fmt.Errorf("remote KMS provider can't use empty string as endpoint")
+			}
+
+			// Get gRPC client service with endpoint.
+			envelopeService, err := envelopeServiceFactory(provider.KMS.Endpoint)
+			if err != nil {
+				return nil, fmt.Errorf("could not configure KMS plugin %q, error: %v", provider.KMS.Name, err)
+			}
+
+			transformer, err = getEnvelopePrefixTransformer(provider.KMS, envelopeService, kmsTransformerPrefixV1)
+			found = true
+		}
+
 		if err != nil {
 			return result, err
 		}
 		result = append(result, transformer)
 
 		if found == false {
-			return result, fmt.Errorf("invalid provider configuration provided")
+			return result, fmt.Errorf("invalid provider configuration: at least one provider must be specified")
 		}
 	}
 	return result, nil
 }
 
-// BlockTransformerFunc taske an AES cipher block and returns a value transformer.
+// BlockTransformerFunc takes an AES cipher block and returns a value transformer.
 type BlockTransformerFunc func(cipher.Block) value.Transformer
 
 // GetAESPrefixTransformer returns a prefix transformer from the provided configuration.
@@ -233,7 +258,7 @@ func GetSecretboxPrefixTransformer(config *SecretboxConfig) (value.PrefixTransfo
 		}
 
 		if len(key) != 32 {
-			return result, fmt.Errorf("expected key size 32 for aes-cbc provider, got %v", len(key))
+			return result, fmt.Errorf("expected key size 32 for secretbox provider, got %v", len(key))
 		}
 
 		keyArray := [32]byte{}
@@ -257,4 +282,17 @@ func GetSecretboxPrefixTransformer(config *SecretboxConfig) (value.PrefixTransfo
 		Prefix:      []byte(secretboxTransformerPrefixV1),
 	}
 	return result, nil
+}
+
+// getEnvelopePrefixTransformer returns a prefix transformer from the provided config.
+// envelopeService is used as the root of trust.
+func getEnvelopePrefixTransformer(config *KMSConfig, envelopeService envelope.Service, prefix string) (value.PrefixTransformer, error) {
+	envelopeTransformer, err := envelope.NewEnvelopeTransformer(envelopeService, config.CacheSize, aestransformer.NewCBCTransformer)
+	if err != nil {
+		return value.PrefixTransformer{}, err
+	}
+	return value.PrefixTransformer{
+		Transformer: envelopeTransformer,
+		Prefix:      []byte(prefix + config.Name + ":"),
+	}, nil
 }

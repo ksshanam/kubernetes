@@ -1,7 +1,5 @@
 package(default_visibility = ["//visibility:public"])
 
-licenses(["notice"])
-
 load(
     "@io_bazel_rules_go//go:def.bzl",
     "go_binary",
@@ -10,14 +8,13 @@ load(
 
 go_binary(
     name = "remote",
-    library = ":go_default_library",
-    tags = ["automanaged"],
+    embed = [":go_default_library"],
 )
 
 go_library(
     name = "go_default_library",
     srcs = ["run_remote.go"],
-    tags = ["automanaged"],
+    importpath = "k8s.io/kubernetes/test/e2e_node/runner/remote",
     deps = [
         "//test/e2e_node/remote:go_default_library",
         "//vendor/github.com/ghodss/yaml:go_default_library",

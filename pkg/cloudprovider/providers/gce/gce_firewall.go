@@ -17,53 +17,38 @@ limitations under the License.
 package gce
 
 import (
-	"time"
+	"context"
 
 	compute "google.golang.org/api/compute/v1"
+
+	"k8s.io/kubernetes/pkg/cloudprovider/providers/gce/cloud/meta"
 )
 
 func newFirewallMetricContext(request string) *metricContext {
-	return &metricContext{
-		start:      time.Now(),
-		attributes: []string{"firewall_" + request, unusedMetricLabel, unusedMetricLabel},
-	}
+	return newGenericMetricContext("firewall", request, unusedMetricLabel, unusedMetricLabel, computeV1Version)
 }
 
 // GetFirewall returns the Firewall by name.
 func (gce *GCECloud) GetFirewall(name string) (*compute.Firewall, error) {
 	mc := newFirewallMetricContext("get")
-	v, err := gce.service.Firewalls.Get(gce.projectID, name).Do()
+	v, err := gce.c.Firewalls().Get(context.Background(), meta.GlobalKey(name))
 	return v, mc.Observe(err)
 }
 
 // CreateFirewall creates the passed firewall
 func (gce *GCECloud) CreateFirewall(f *compute.Firewall) error {
 	mc := newFirewallMetricContext("create")
-	op, err := gce.service.Firewalls.Insert(gce.projectID, f).Do()
-	if err != nil {
-		return mc.Observe(err)
-	}
-
-	return gce.waitForGlobalOp(op, mc)
+	return mc.Observe(gce.c.Firewalls().Insert(context.Background(), meta.GlobalKey(f.Name), f))
 }
 
 // DeleteFirewall deletes the given firewall rule.
 func (gce *GCECloud) DeleteFirewall(name string) error {
 	mc := newFirewallMetricContext("delete")
-	op, err := gce.service.Firewalls.Delete(gce.projectID, name).Do()
-	if err != nil {
-		return mc.Observe(err)
-	}
-	return gce.waitForGlobalOp(op, mc)
+	return mc.Observe(gce.c.Firewalls().Delete(context.Background(), meta.GlobalKey(name)))
 }
 
 // UpdateFirewall applies the given firewall as an update to an existing service.
 func (gce *GCECloud) UpdateFirewall(f *compute.Firewall) error {
 	mc := newFirewallMetricContext("update")
-	op, err := gce.service.Firewalls.Update(gce.projectID, f.Name, f).Do()
-	if err != nil {
-		return mc.Observe(err)
-	}
-
-	return gce.waitForGlobalOp(op, mc)
+	return mc.Observe(gce.c.Firewalls().Update(context.Background(), meta.GlobalKey(f.Name), f))
 }

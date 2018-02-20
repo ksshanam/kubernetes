@@ -39,7 +39,6 @@ const (
 	mountDeviceCmd   = "mountdevice"
 
 	detachCmd        = "detach"
-	waitForDetachCmd = "waitfordetach"
 	unmountDeviceCmd = "unmountdevice"
 
 	mountCmd   = "mount"
@@ -58,8 +57,6 @@ const (
 	optionKeyPodUID       = "kubernetes.io/pod.uid"
 
 	optionKeyServiceAccountName = "kubernetes.io/serviceAccount.name"
-
-	attachCapability = "attach"
 )
 
 const (
@@ -144,7 +141,7 @@ func (dc *DriverCall) Run() (*DriverStatus, error) {
 		if isCmdNotSupportedErr(err) {
 			dc.plugin.unsupported(dc.Command)
 		} else {
-			glog.Warningf("FlexVolume: driver call failed: executable: %s, args: %s, error: %s, output: %s", execPath, dc.args, execErr.Error(), output)
+			glog.Warningf("FlexVolume: driver call failed: executable: %s, args: %s, error: %s, output: %q", execPath, dc.args, execErr.Error(), output)
 		}
 		return nil, err
 	}
@@ -164,10 +161,25 @@ func (dc *DriverCall) Run() (*DriverStatus, error) {
 type OptionsForDriver map[string]string
 
 func NewOptionsForDriver(spec *volume.Spec, host volume.VolumeHost, extraOptions map[string]string) (OptionsForDriver, error) {
-	volSource, readOnly := getVolumeSource(spec)
+
+	volSourceFSType, err := getFSType(spec)
+	if err != nil {
+		return nil, err
+	}
+
+	readOnly, err := getReadOnly(spec)
+	if err != nil {
+		return nil, err
+	}
+
+	volSourceOptions, err := getOptions(spec)
+	if err != nil {
+		return nil, err
+	}
+
 	options := map[string]string{}
 
-	options[optionFSType] = volSource.FSType
+	options[optionFSType] = volSourceFSType
 
 	if readOnly {
 		options[optionReadWrite] = "ro"
@@ -181,7 +193,7 @@ func NewOptionsForDriver(spec *volume.Spec, host volume.VolumeHost, extraOptions
 		options[key] = value
 	}
 
-	for key, value := range volSource.Options {
+	for key, value := range volSourceOptions {
 		options[key] = value
 	}
 
@@ -204,7 +216,19 @@ type DriverStatus struct {
 	// Returns capabilities of the driver.
 	// By default we assume all the capabilities are supported.
 	// If the plugin does not support a capability, it can return false for that capability.
-	Capabilities map[string]bool
+	Capabilities *DriverCapabilities `json:",omitempty"`
+}
+
+type DriverCapabilities struct {
+	Attach         bool `json:"attach"`
+	SELinuxRelabel bool `json:"selinuxRelabel"`
+}
+
+func defaultCapabilities() *DriverCapabilities {
+	return &DriverCapabilities{
+		Attach:         true,
+		SELinuxRelabel: true,
+	}
 }
 
 // isCmdNotSupportedErr checks if the error corresponds to command not supported by
@@ -220,9 +244,11 @@ func isCmdNotSupportedErr(err error) bool {
 // handleCmdResponse processes the command output and returns the appropriate
 // error code or message.
 func handleCmdResponse(cmd string, output []byte) (*DriverStatus, error) {
-	var status DriverStatus
+	status := DriverStatus{
+		Capabilities: defaultCapabilities(),
+	}
 	if err := json.Unmarshal(output, &status); err != nil {
-		glog.Errorf("Failed to unmarshal output for command: %s, output: %s, error: %s", cmd, string(output), err.Error())
+		glog.Errorf("Failed to unmarshal output for command: %s, output: %q, error: %s", cmd, string(output), err.Error())
 		return nil, err
 	} else if status.Status == StatusNotSupported {
 		glog.V(5).Infof("%s command is not supported by the driver", cmd)

@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apiserver/pkg/util/wsstream"
 	"k8s.io/client-go/tools/remotecommand"
-	"k8s.io/kubernetes/pkg/api"
+	api "k8s.io/kubernetes/pkg/apis/core"
 
 	"github.com/golang/glog"
 )
@@ -156,7 +156,7 @@ func createHttpStreamStreams(req *http.Request, w http.ResponseWriter, opts *Opt
 	case remotecommandconsts.StreamProtocolV2Name:
 		handler = &v2ProtocolHandler{}
 	case "":
-		glog.V(4).Infof("Client did not request protocol negotiaion. Falling back to %q", remotecommandconsts.StreamProtocolV1Name)
+		glog.V(4).Infof("Client did not request protocol negotiation. Falling back to %q", remotecommandconsts.StreamProtocolV1Name)
 		fallthrough
 	case remotecommandconsts.StreamProtocolV1Name:
 		handler = &v1ProtocolHandler{}
@@ -423,7 +423,7 @@ func handleResizeEvents(stream io.Reader, channel chan<- remotecommand.TerminalS
 	}
 }
 
-func v1WriteStatusFunc(stream io.WriteCloser) func(status *apierrors.StatusError) error {
+func v1WriteStatusFunc(stream io.Writer) func(status *apierrors.StatusError) error {
 	return func(status *apierrors.StatusError) error {
 		if status.Status().Status == metav1.StatusSuccess {
 			return nil // send error messages
@@ -435,7 +435,7 @@ func v1WriteStatusFunc(stream io.WriteCloser) func(status *apierrors.StatusError
 
 // v4WriteStatusFunc returns a WriteStatusFunc that marshals a given api Status
 // as json in the error channel.
-func v4WriteStatusFunc(stream io.WriteCloser) func(status *apierrors.StatusError) error {
+func v4WriteStatusFunc(stream io.Writer) func(status *apierrors.StatusError) error {
 	return func(status *apierrors.StatusError) error {
 		bs, err := json.Marshal(status.Status())
 		if err != nil {

@@ -1,11 +1,4 @@
-package(default_visibility = ["//visibility:public"])
-
-licenses(["notice"])
-
-load(
-    "@io_bazel_rules_go//go:def.bzl",
-    "go_library",
-)
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "go_default_library",
@@ -19,6 +12,7 @@ go_library(
         "float64.go",
         "golangflag.go",
         "int.go",
+        "int16.go",
         "int32.go",
         "int64.go",
         "int8.go",
@@ -37,7 +31,8 @@ go_library(
         "uint8.go",
         "uint_slice.go",
     ],
-    tags = ["automanaged"],
+    importpath = "github.com/spf13/pflag",
+    visibility = ["//visibility:public"],
 )
 
 filegroup(
@@ -51,4 +46,5 @@ filegroup(
     name = "all-srcs",
     srcs = [":package-srcs"],
     tags = ["automanaged"],
+    visibility = ["//visibility:public"],
 )

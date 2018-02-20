@@ -17,7 +17,6 @@ limitations under the License.
 package cmd
 
 import (
-	"fmt"
 	"io"
 
 	"github.com/spf13/cobra"
@@ -25,7 +24,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubectl"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/util/i18n"
+	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 )
 
 var (
@@ -40,11 +39,12 @@ var (
 // NewCmdCreateServiceAccount is a macro command to create a new service account
 func NewCmdCreateServiceAccount(f cmdutil.Factory, cmdOut io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "serviceaccount NAME [--dry-run]",
-		Aliases: []string{"sa"},
-		Short:   i18n.T("Create a service account with the specified name"),
-		Long:    serviceAccountLong,
-		Example: serviceAccountExample,
+		Use: "serviceaccount NAME [--dry-run]",
+		DisableFlagsInUseLine: true,
+		Aliases:               []string{"sa"},
+		Short:                 i18n.T("Create a service account with the specified name"),
+		Long:                  serviceAccountLong,
+		Example:               serviceAccountExample,
 		Run: func(cmd *cobra.Command, args []string) {
 			err := CreateServiceAccount(f, cmdOut, cmd, args)
 			cmdutil.CheckErr(err)
@@ -69,7 +69,7 @@ func CreateServiceAccount(f cmdutil.Factory, cmdOut io.Writer, cmd *cobra.Comman
 	case cmdutil.ServiceAccountV1GeneratorName:
 		generator = &kubectl.ServiceAccountGeneratorV1{Name: name}
 	default:
-		return cmdutil.UsageError(cmd, fmt.Sprintf("Generator: %s not supported.", generatorName))
+		return errUnsupportedGenerator(cmd, generatorName)
 	}
 	return RunCreateSubcommand(f, cmd, cmdOut, &CreateSubcommandOptions{
 		Name:                name,

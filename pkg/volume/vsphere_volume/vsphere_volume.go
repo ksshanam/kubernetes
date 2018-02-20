@@ -23,11 +23,10 @@ import (
 	"strings"
 
 	"github.com/golang/glog"
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/mount"
 	utilstrings "k8s.io/kubernetes/pkg/util/strings"
 	"k8s.io/kubernetes/pkg/volume"
@@ -52,6 +51,10 @@ var _ volume.ProvisionableVolumePlugin = &vsphereVolumePlugin{}
 const (
 	vsphereVolumePluginName = "kubernetes.io/vsphere-volume"
 )
+
+func getPath(uid types.UID, volName string, host volume.VolumeHost) string {
+	return host.GetPodVolumeDir(uid, utilstrings.EscapeQualifiedNameForDisk(vsphereVolumePluginName), volName)
+}
 
 // vSphere Volume Plugin
 func (plugin *vsphereVolumePlugin) Init(host volume.VolumeHost) error {
@@ -86,15 +89,15 @@ func (plugin *vsphereVolumePlugin) SupportsMountOption() bool {
 }
 
 func (plugin *vsphereVolumePlugin) SupportsBulkVolumeVerification() bool {
-	return false
+	return true
 }
 
 func (plugin *vsphereVolumePlugin) NewMounter(spec *volume.Spec, pod *v1.Pod, _ volume.VolumeOptions) (volume.Mounter, error) {
-	return plugin.newMounterInternal(spec, pod.UID, &VsphereDiskUtil{}, plugin.host.GetMounter())
+	return plugin.newMounterInternal(spec, pod.UID, &VsphereDiskUtil{}, plugin.host.GetMounter(plugin.GetPluginName()))
 }
 
 func (plugin *vsphereVolumePlugin) NewUnmounter(volName string, podUID types.UID) (volume.Unmounter, error) {
-	return plugin.newUnmounterInternal(volName, podUID, &VsphereDiskUtil{}, plugin.host.GetMounter())
+	return plugin.newUnmounterInternal(volName, podUID, &VsphereDiskUtil{}, plugin.host.GetMounter(plugin.GetPluginName()))
 }
 
 func (plugin *vsphereVolumePlugin) newMounterInternal(spec *volume.Spec, podUID types.UID, manager vdManager, mounter mount.Interface) (volume.Mounter, error) {
@@ -108,30 +111,32 @@ func (plugin *vsphereVolumePlugin) newMounterInternal(spec *volume.Spec, podUID 
 
 	return &vsphereVolumeMounter{
 		vsphereVolume: &vsphereVolume{
-			podUID:  podUID,
-			volName: spec.Name(),
-			volPath: volPath,
-			manager: manager,
-			mounter: mounter,
-			plugin:  plugin,
+			podUID:          podUID,
+			volName:         spec.Name(),
+			volPath:         volPath,
+			manager:         manager,
+			mounter:         mounter,
+			plugin:          plugin,
+			MetricsProvider: volume.NewMetricsStatFS(getPath(podUID, spec.Name(), plugin.host)),
 		},
 		fsType:      fsType,
-		diskMounter: &mount.SafeFormatAndMount{Interface: mounter, Runner: exec.New()}}, nil
+		diskMounter: volumehelper.NewSafeFormatAndMountFromHost(plugin.GetPluginName(), plugin.host)}, nil
 }
 
 func (plugin *vsphereVolumePlugin) newUnmounterInternal(volName string, podUID types.UID, manager vdManager, mounter mount.Interface) (volume.Unmounter, error) {
 	return &vsphereVolumeUnmounter{
 		&vsphereVolume{
-			podUID:  podUID,
-			volName: volName,
-			manager: manager,
-			mounter: mounter,
-			plugin:  plugin,
+			podUID:          podUID,
+			volName:         volName,
+			manager:         manager,
+			mounter:         mounter,
+			plugin:          plugin,
+			MetricsProvider: volume.NewMetricsStatFS(getPath(podUID, volName, plugin.host)),
 		}}, nil
 }
 
 func (plugin *vsphereVolumePlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volume.Spec, error) {
-	mounter := plugin.host.GetMounter()
+	mounter := plugin.host.GetMounter(plugin.GetPluginName())
 	pluginDir := plugin.host.GetPluginDir(plugin.GetPluginName())
 	volumePath, err := mounter.GetDeviceNameFromMount(mountPath, pluginDir)
 	if err != nil {
@@ -175,7 +180,7 @@ type vsphereVolume struct {
 	// diskMounter provides the interface that is used to mount the actual block device.
 	diskMounter mount.Interface
 	plugin      *vsphereVolumePlugin
-	volume.MetricsNil
+	volume.MetricsProvider
 }
 
 var _ volume.Mounter = &vsphereVolumeMounter{}
@@ -380,6 +385,7 @@ func (v *vsphereVolumeProvisioner) Provision() (*v1.PersistentVolume, error) {
 					StoragePolicyID:   volSpec.StoragePolicyID,
 				},
 			},
+			MountOptions: v.options.MountOptions,
 		},
 	}
 	if len(v.options.PVC.Spec.AccessModes) == 0 {

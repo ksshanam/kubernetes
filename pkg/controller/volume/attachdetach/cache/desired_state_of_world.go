@@ -25,8 +25,8 @@ import (
 	"fmt"
 	"sync"
 
+	"k8s.io/api/core/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
-	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util/operationexecutor"
 	"k8s.io/kubernetes/pkg/volume/util/types"
@@ -101,6 +101,14 @@ type DesiredStateOfWorld interface {
 	// GetKeepTerminatedPodVolumesForNode determines if node wants volumes to be
 	// mounted and attached for terminated pods
 	GetKeepTerminatedPodVolumesForNode(k8stypes.NodeName) bool
+
+	// Mark multiattach error as reported to prevent spamming multiple
+	// events for same error
+	SetMultiAttachError(v1.UniqueVolumeName, k8stypes.NodeName)
+
+	// GetPodsOnNodes returns list of pods ("namespace/name") that require
+	// given volume on given nodes.
+	GetVolumePodsOnNodes(nodes []k8stypes.NodeName, volumeName v1.UniqueVolumeName) []*v1.Pod
 }
 
 // VolumeToAttach represents a volume that should be attached to a node.
@@ -148,7 +156,7 @@ type nodeManaged struct {
 
 	// volumesToAttach is a map containing the set of volumes that should be
 	// attached to this node. The key in the map is the name of the volume and
-	// the value is a pod object containing more information about the volume.
+	// the value is a volumeToAttach object containing more information about the volume.
 	volumesToAttach map[v1.UniqueVolumeName]volumeToAttach
 
 	// keepTerminatedPodVolumes determines if for terminated pods(on this node) - volumes
@@ -156,7 +164,7 @@ type nodeManaged struct {
 	keepTerminatedPodVolumes bool
 }
 
-// The volume object represents a volume that should be attached to a node.
+// The volumeToAttach object represents a volume that should be attached to a node.
 type volumeToAttach struct {
 	// multiAttachErrorReported indicates whether the multi-attach error has been reported for the given volume.
 	// It is used to to prevent reporting the error from being reported more than once for a given volume.
@@ -329,6 +337,21 @@ func (dsw *desiredStateOfWorld) VolumeExists(
 	return false
 }
 
+func (dsw *desiredStateOfWorld) SetMultiAttachError(
+	volumeName v1.UniqueVolumeName,
+	nodeName k8stypes.NodeName) {
+	dsw.Lock()
+	defer dsw.Unlock()
+
+	nodeObj, nodeExists := dsw.nodesManaged[nodeName]
+	if nodeExists {
+		if volumeObj, volumeExists := nodeObj.volumesToAttach[volumeName]; volumeExists {
+			volumeObj.multiAttachErrorReported = true
+			dsw.nodesManaged[nodeName].volumesToAttach[volumeName] = volumeObj
+		}
+	}
+}
+
 // GetKeepTerminatedPodVolumesForNode determines if node wants volumes to be
 // mounted and attached for terminated pods
 func (dsw *desiredStateOfWorld) GetKeepTerminatedPodVolumesForNode(nodeName k8stypes.NodeName) bool {
@@ -389,6 +412,27 @@ func (dsw *desiredStateOfWorld) GetPodToAdd() map[types.UniquePodName]PodToAdd {
 					NodeName:   nodeName,
 				}
 			}
+		}
+	}
+	return pods
+}
+
+func (dsw *desiredStateOfWorld) GetVolumePodsOnNodes(nodes []k8stypes.NodeName, volumeName v1.UniqueVolumeName) []*v1.Pod {
+	dsw.RLock()
+	defer dsw.RUnlock()
+
+	pods := []*v1.Pod{}
+	for _, nodeName := range nodes {
+		node, ok := dsw.nodesManaged[nodeName]
+		if !ok {
+			continue
+		}
+		volume, ok := node.volumesToAttach[volumeName]
+		if !ok {
+			continue
+		}
+		for _, pod := range volume.scheduledPods {
+			pods = append(pods, pod.podObj)
 		}
 	}
 	return pods

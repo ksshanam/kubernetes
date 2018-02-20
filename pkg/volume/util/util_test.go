@@ -17,11 +17,19 @@ limitations under the License.
 package util
 
 import (
+	"io/ioutil"
+	"os"
 	"testing"
 
+	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/api/v1/helper"
+	"k8s.io/apimachinery/pkg/util/sets"
+	utiltesting "k8s.io/client-go/util/testing"
+	// util.go uses api.Codecs.LegacyCodec so import this package to do some
+	// resource initialization.
+	_ "k8s.io/kubernetes/pkg/apis/core/install"
+	"k8s.io/kubernetes/pkg/apis/core/v1/helper"
+	"k8s.io/kubernetes/pkg/util/mount"
 )
 
 var nodeLabels map[string]string = map[string]string{
@@ -29,7 +37,7 @@ var nodeLabels map[string]string = map[string]string{
 	"test-key2": "test-value2",
 }
 
-func TestCheckNodeAffinity(t *testing.T) {
+func TestCheckAlphaNodeAffinity(t *testing.T) {
 	type affinityTest struct {
 		name          string
 		expectSuccess bool
@@ -40,12 +48,12 @@ func TestCheckNodeAffinity(t *testing.T) {
 		{
 			name:          "valid-no-constraints",
 			expectSuccess: true,
-			pv:            testVolumeWithNodeAffinity(t, &v1.NodeAffinity{}),
+			pv:            testVolumeWithAlphaNodeAffinity(t, &v1.NodeAffinity{}),
 		},
 		{
 			name:          "valid-constraints",
 			expectSuccess: true,
-			pv: testVolumeWithNodeAffinity(t, &v1.NodeAffinity{
+			pv: testVolumeWithAlphaNodeAffinity(t, &v1.NodeAffinity{
 				RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
 					NodeSelectorTerms: []v1.NodeSelectorTerm{
 						{
@@ -69,7 +77,7 @@ func TestCheckNodeAffinity(t *testing.T) {
 		{
 			name:          "invalid-key",
 			expectSuccess: false,
-			pv: testVolumeWithNodeAffinity(t, &v1.NodeAffinity{
+			pv: testVolumeWithAlphaNodeAffinity(t, &v1.NodeAffinity{
 				RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
 					NodeSelectorTerms: []v1.NodeSelectorTerm{
 						{
@@ -93,7 +101,7 @@ func TestCheckNodeAffinity(t *testing.T) {
 		{
 			name:          "invalid-values",
 			expectSuccess: false,
-			pv: testVolumeWithNodeAffinity(t, &v1.NodeAffinity{
+			pv: testVolumeWithAlphaNodeAffinity(t, &v1.NodeAffinity{
 				RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
 					NodeSelectorTerms: []v1.NodeSelectorTerm{
 						{
@@ -128,7 +136,111 @@ func TestCheckNodeAffinity(t *testing.T) {
 	}
 }
 
-func testVolumeWithNodeAffinity(t *testing.T, affinity *v1.NodeAffinity) *v1.PersistentVolume {
+func TestCheckVolumeNodeAffinity(t *testing.T) {
+	type affinityTest struct {
+		name          string
+		expectSuccess bool
+		pv            *v1.PersistentVolume
+	}
+
+	cases := []affinityTest{
+		{
+			name:          "valid-nil",
+			expectSuccess: true,
+			pv:            testVolumeWithNodeAffinity(t, nil),
+		},
+		{
+			name:          "valid-no-constraints",
+			expectSuccess: true,
+			pv:            testVolumeWithNodeAffinity(t, &v1.VolumeNodeAffinity{}),
+		},
+		{
+			name:          "valid-constraints",
+			expectSuccess: true,
+			pv: testVolumeWithNodeAffinity(t, &v1.VolumeNodeAffinity{
+				Required: &v1.NodeSelector{
+					NodeSelectorTerms: []v1.NodeSelectorTerm{
+						{
+							MatchExpressions: []v1.NodeSelectorRequirement{
+								{
+									Key:      "test-key1",
+									Operator: v1.NodeSelectorOpIn,
+									Values:   []string{"test-value1", "test-value3"},
+								},
+								{
+									Key:      "test-key2",
+									Operator: v1.NodeSelectorOpIn,
+									Values:   []string{"test-value0", "test-value2"},
+								},
+							},
+						},
+					},
+				},
+			}),
+		},
+		{
+			name:          "invalid-key",
+			expectSuccess: false,
+			pv: testVolumeWithNodeAffinity(t, &v1.VolumeNodeAffinity{
+				Required: &v1.NodeSelector{
+					NodeSelectorTerms: []v1.NodeSelectorTerm{
+						{
+							MatchExpressions: []v1.NodeSelectorRequirement{
+								{
+									Key:      "test-key1",
+									Operator: v1.NodeSelectorOpIn,
+									Values:   []string{"test-value1", "test-value3"},
+								},
+								{
+									Key:      "test-key3",
+									Operator: v1.NodeSelectorOpIn,
+									Values:   []string{"test-value0", "test-value2"},
+								},
+							},
+						},
+					},
+				},
+			}),
+		},
+		{
+			name:          "invalid-values",
+			expectSuccess: false,
+			pv: testVolumeWithNodeAffinity(t, &v1.VolumeNodeAffinity{
+				Required: &v1.NodeSelector{
+					NodeSelectorTerms: []v1.NodeSelectorTerm{
+						{
+							MatchExpressions: []v1.NodeSelectorRequirement{
+								{
+									Key:      "test-key1",
+									Operator: v1.NodeSelectorOpIn,
+									Values:   []string{"test-value3", "test-value4"},
+								},
+								{
+									Key:      "test-key2",
+									Operator: v1.NodeSelectorOpIn,
+									Values:   []string{"test-value0", "test-value2"},
+								},
+							},
+						},
+					},
+				},
+			}),
+		},
+	}
+
+	for _, c := range cases {
+		err := CheckNodeAffinity(c.pv, nodeLabels)
+
+		if err != nil && c.expectSuccess {
+			t.Errorf("CheckTopology %v returned error: %v", c.name, err)
+		}
+		if err == nil && !c.expectSuccess {
+			t.Errorf("CheckTopology %v returned success, expected error", c.name)
+		}
+	}
+}
+
+func testVolumeWithAlphaNodeAffinity(t *testing.T, affinity *v1.NodeAffinity) *v1.PersistentVolume {
 	objMeta := metav1.ObjectMeta{Name: "test-constraints"}
 	objMeta.Annotations = map[string]string{}
 	err := helper.StorageNodeAffinityToAlphaAnnotation(objMeta.Annotations, affinity)
@@ -138,5 +250,171 @@ func testVolumeWithNodeAffinity(t *testing.T, affinity *v1.NodeAffinity) *v1.Per
 
 	return &v1.PersistentVolume{
 		ObjectMeta: objMeta,
+	}
+}
+
+func testVolumeWithNodeAffinity(t *testing.T, affinity *v1.VolumeNodeAffinity) *v1.PersistentVolume {
+	objMeta := metav1.ObjectMeta{Name: "test-constraints"}
+	return &v1.PersistentVolume{
+		ObjectMeta: objMeta,
+		Spec: v1.PersistentVolumeSpec{
+			NodeAffinity: affinity,
+		},
+	}
+}
+
+func TestLoadPodFromFile(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		expectError bool
+	}{
+		{
+			"yaml",
+			`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: testpod
+spec:
+  containers:
+    - image: k8s.gcr.io/busybox
+`,
+			false,
+		},
+
+		{
+			"json",
+			`
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "testpod"
+  },
+  "spec": {
+    "containers": [
+      {
+        "image": "k8s.gcr.io/busybox"
+      }
+    ]
+  }
+}`,
+			false,
+		},
+
+		{
+			"invalid pod",
+			`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: testpod
+spec:
+  - image: k8s.gcr.io/busybox
+`,
+			true,
+		},
+	}
+
+	for _, test := range tests {
+		tempFile, err := ioutil.TempFile("", "podfile")
+		defer os.Remove(tempFile.Name())
+		if err != nil {
+			t.Fatalf("cannot create temporary file: %v", err)
+		}
+		if _, err = tempFile.Write([]byte(test.content)); err != nil {
+			t.Fatalf("cannot save temporary file: %v", err)
+		}
+		if err = tempFile.Close(); err != nil {
+			t.Fatalf("cannot close temporary file: %v", err)
+		}
+
+		pod, err := LoadPodFromFile(tempFile.Name())
+		if test.expectError {
+			if err == nil {
+				t.Errorf("test %q expected error, got nil", test.name)
+			}
+		} else {
+			// no error expected
+			if err != nil {
+				t.Errorf("error loading pod %q: %v", test.name, err)
+			}
+			if pod == nil {
+				t.Errorf("test %q expected pod, got nil", test.name)
+			}
+		}
+	}
+}
+func TestZonesToSet(t *testing.T) {
+	functionUnderTest := "ZonesToSet"
+	// First part: want an error
+	sliceOfZones := []string{"", ",", "us-east-1a, , us-east-1d", ", us-west-1b", "us-west-2b,"}
+	for _, zones := range sliceOfZones {
+		if got, err := ZonesToSet(zones); err == nil {
+			t.Errorf("%v(%v) returned (%v), want (%v)", functionUnderTest, zones, got, "an error")
+		}
+	}
+
+	// Second part: want no error
+	tests := []struct {
+		zones string
+		want  sets.String
+	}{
+		{
+			zones: "us-east-1a",
+			want:  sets.String{"us-east-1a": sets.Empty{}},
+		},
+		{
+			zones: "us-east-1a, us-west-2a",
+			want: sets.String{
+				"us-east-1a": sets.Empty{},
+				"us-west-2a": sets.Empty{},
+			},
+		},
+	}
+	for _, tt := range tests {
+		if got, err := ZonesToSet(tt.zones); err != nil || !got.Equal(tt.want) {
+			t.Errorf("%v(%v) returned (%v), want (%v)", functionUnderTest, tt.zones, got, tt.want)
+		}
+	}
+}
+
+func TestDoUnmountMountPoint(t *testing.T) {
+
+	tmpDir1, err1 := utiltesting.MkTmpdir("umount_test1")
+	if err1 != nil {
+		t.Fatalf("error creating temp dir: %v", err1)
+	}
+	defer os.RemoveAll(tmpDir1)
+
+	tmpDir2, err2 := utiltesting.MkTmpdir("umount_test2")
+	if err2 != nil {
+		t.Fatalf("error creating temp dir: %v", err2)
+	}
+	defer os.RemoveAll(tmpDir2)
+
+	// Second part: want no error
+	tests := []struct {
+		mountPath    string
+		corruptedMnt bool
+	}{
+		{
+			mountPath:    tmpDir1,
+			corruptedMnt: true,
+		},
+		{
+			mountPath:    tmpDir2,
+			corruptedMnt: false,
+		},
+	}
+
+	fake := &mount.FakeMounter{}
+
+	for _, tt := range tests {
+		err := doUnmountMountPoint(tt.mountPath, fake, false, tt.corruptedMnt)
+		if err != nil {
+			t.Errorf("err Expected nil, but got: %v", err)
+		}
 	}
 }

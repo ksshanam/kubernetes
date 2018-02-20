@@ -23,7 +23,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	"k8s.io/kubernetes/pkg/util/i18n"
+	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 )
 
 var (
@@ -42,13 +42,15 @@ var (
 
 		   * deployments
 		   * daemonsets
+		   * statefulsets
 		`)
 )
 
 func NewCmdRollout(f cmdutil.Factory, out, errOut io.Writer) *cobra.Command {
 
 	cmd := &cobra.Command{
-		Use:     "rollout SUBCOMMAND",
+		Use: "rollout SUBCOMMAND",
+		DisableFlagsInUseLine: true,
 		Short:   i18n.T("Manage the rollout of a resource"),
 		Long:    rollout_long,
 		Example: rollout_example,

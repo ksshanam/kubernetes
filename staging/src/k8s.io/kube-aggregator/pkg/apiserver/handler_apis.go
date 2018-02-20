@@ -29,12 +29,13 @@ import (
 	"k8s.io/apiserver/pkg/endpoints/request"
 
 	apiregistrationapi "k8s.io/kube-aggregator/pkg/apis/apiregistration"
+	apiregistrationv1api "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	apiregistrationv1beta1api "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1beta1"
 	listers "k8s.io/kube-aggregator/pkg/client/listers/apiregistration/internalversion"
 )
 
 // apisHandler serves the `/apis` endpoint.
-// This is registered as a filter so that it never collides with any explictly registered endpoints
+// This is registered as a filter so that it never collides with any explicitly registered endpoints
 type apisHandler struct {
 	codecs serializer.CodecFactory
 	lister listers.APIServiceLister
@@ -45,13 +46,17 @@ var discoveryGroup = metav1.APIGroup{
 	Name: apiregistrationapi.GroupName,
 	Versions: []metav1.GroupVersionForDiscovery{
 		{
+			GroupVersion: apiregistrationv1api.SchemeGroupVersion.String(),
+			Version:      apiregistrationv1api.SchemeGroupVersion.Version,
+		},
+		{
 			GroupVersion: apiregistrationv1beta1api.SchemeGroupVersion.String(),
 			Version:      apiregistrationv1beta1api.SchemeGroupVersion.Version,
 		},
 	},
 	PreferredVersion: metav1.GroupVersionForDiscovery{
-		GroupVersion: apiregistrationv1beta1api.SchemeGroupVersion.String(),
-		Version:      apiregistrationv1beta1api.SchemeGroupVersion.Version,
+		GroupVersion: apiregistrationv1api.SchemeGroupVersion.String(),
+		Version:      apiregistrationv1api.SchemeGroupVersion.Version,
 	},
 }
 

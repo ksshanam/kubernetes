@@ -34,7 +34,7 @@ function run_kube_apiserver() {
   kube::log::status "Starting kube-apiserver"
 
   # Admission Controllers to invoke prior to persisting objects in cluster
-  ADMISSION_CONTROL="Initializers,NamespaceLifecycle,LimitRanger,ResourceQuota"
+  ENABLE_ADMISSION_PLUGINS="Initializers,LimitRanger,ResourceQuota"
 
   # Include RBAC (to exercise bootstrapping), and AlwaysAllow to allow all actions
   AUTHORIZATION_MODE="RBAC,AlwaysAllow"
@@ -45,13 +45,13 @@ function run_kube_apiserver() {
     --insecure-port="${API_PORT}" \
     --authorization-mode="${AUTHORIZATION_MODE}" \
     --secure-port="${SECURE_API_PORT}" \
-    --admission-control="${ADMISSION_CONTROL}" \
+    --enable-admission-plugins="${ENABLE_ADMISSION_PLUGINS}" \
     --etcd-servers="http://${ETCD_HOST}:${ETCD_PORT}" \
     --runtime-config=api/v1 \
     --storage-media-type="${KUBE_TEST_API_STORAGE_TYPE-}" \
     --cert-dir="${TMPDIR:-/tmp/}" \
     --service-cluster-ip-range="10.0.0.0/24" \
-    --insecure-allow-any-token 1>&2 &
+    --token-auth-file=hack/testdata/auth-tokens.csv 1>&2 &
   APISERVER_PID=$!
 
   kube::util::wait_for_url "http://127.0.0.1:${API_PORT}/healthz" "apiserver"

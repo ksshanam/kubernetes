@@ -27,8 +27,6 @@ import (
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/types"
-	kubetypes "k8s.io/apimachinery/pkg/types"
-	"k8s.io/kubernetes/pkg/api/v1"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 )
 
@@ -179,22 +177,23 @@ func (f *fakeRktCli) Reset() {
 	f.err = nil
 }
 
-type fakePodGetter struct {
-	pods map[types.UID]*v1.Pod
+type fakePodDeletionProvider struct {
+	pods map[types.UID]struct{}
 }
 
-func newFakePodGetter() *fakePodGetter {
-	return &fakePodGetter{pods: make(map[types.UID]*v1.Pod)}
+func newFakePodDeletionProvider() *fakePodDeletionProvider {
+	return &fakePodDeletionProvider{
+		pods: make(map[types.UID]struct{}),
+	}
 }
 
-func (f fakePodGetter) GetPodByUID(uid types.UID) (*v1.Pod, bool) {
-	p, found := f.pods[uid]
-	return p, found
+func (f *fakePodDeletionProvider) IsPodDeleted(uid types.UID) bool {
+	_, found := f.pods[uid]
+	return !found
 }
 
 type fakeUnitGetter struct {
 	networkNamespace kubecontainer.ContainerID
-	callServices     []string
 }
 
 func newfakeUnitGetter() *fakeUnitGetter {
@@ -203,7 +202,7 @@ func newfakeUnitGetter() *fakeUnitGetter {
 	}
 }
 
-func (f *fakeUnitGetter) getNetworkNamespace(uid kubetypes.UID, latestPod *rktapi.Pod) (kubecontainer.ContainerID, error) {
+func (f *fakeUnitGetter) getNetworkNamespace(uid types.UID, latestPod *rktapi.Pod) (kubecontainer.ContainerID, error) {
 	return kubecontainer.ContainerID{ID: "42"}, nil
 }
 

@@ -30,10 +30,10 @@ import (
 	"github.com/miekg/dns"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/kubernetes/pkg/api"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/proxy"
-	"k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/ipconfig"
+	"k8s.io/utils/exec"
 )
 
 const (
@@ -281,7 +281,7 @@ func appendDNSSuffix(msg *dns.Msg, buffer []byte, length int, dnsSuffix string) 
 	msg.Question[0].Name = origName
 
 	if err != nil {
-		glog.Warning("Unable to pack DNS packet. Error is: %v", err)
+		glog.Warningf("Unable to pack DNS packet. Error is: %v", err)
 		return length, err
 	}
 
@@ -308,7 +308,7 @@ func recoverDNSQuestion(origName string, msg *dns.Msg, buffer []byte, length int
 	mbuf, err := msg.PackBuffer(buffer)
 
 	if err != nil {
-		glog.Warning("Unable to pack DNS packet. Error is: %v", err)
+		glog.Warningf("Unable to pack DNS packet. Error is: %v", err)
 		return length, err
 	}
 
@@ -382,7 +382,7 @@ func processUnpackedDNSResponsePacket(
 	if found {
 		index := atomic.SwapInt32(&state.searchIndex, state.searchIndex+1)
 		if rcode != 0 && index >= 0 && index < int32(len(dnsSearch)) {
-			// If the reponse has failure and iteration through the search list has not
+			// If the response has failure and iteration through the search list has not
 			// reached the end, retry on behalf of the client using the original query message
 			drop = true
 			length, err = appendDNSSuffix(state.msg, buffer, length, dnsSearch[index])
@@ -419,7 +419,7 @@ func processDNSQueryPacket(
 	dnsSearch []string) (int, error) {
 	msg := &dns.Msg{}
 	if err := msg.Unpack(buffer[:length]); err != nil {
-		glog.Warning("Unable to unpack DNS packet. Error is: %v", err)
+		glog.Warningf("Unable to unpack DNS packet. Error is: %v", err)
 		return length, err
 	}
 
@@ -466,7 +466,7 @@ func processDNSResponsePacket(
 	var drop bool
 	msg := &dns.Msg{}
 	if err := msg.Unpack(buffer[:length]); err != nil {
-		glog.Warning("Unable to unpack DNS packet. Error is: %v", err)
+		glog.Warningf("Unable to unpack DNS packet. Error is: %v", err)
 		return drop, length, err
 	}
 
@@ -477,7 +477,7 @@ func processDNSResponsePacket(
 
 	// QDCOUNT
 	if len(msg.Question) != 1 {
-		glog.V(1).Infof("Number of entries in the reponse section of the DNS packet is: %d", len(msg.Answer))
+		glog.V(1).Infof("Number of entries in the response section of the DNS packet is: %d", len(msg.Answer))
 		return drop, length, nil
 	}
 

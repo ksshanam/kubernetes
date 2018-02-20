@@ -22,11 +22,10 @@ import (
 	"testing"
 
 	"github.com/blang/semver"
-	dockercontainer "github.com/docker/engine-api/types/container"
+	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/stretchr/testify/assert"
 
-	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/v1alpha1/runtime"
-	"k8s.io/kubernetes/pkg/kubelet/dockershim/securitycontext"
+	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
 )
 
 func TestModifyContainerConfig(t *testing.T) {
@@ -83,10 +82,10 @@ func TestModifyHostConfig(t *testing.T) {
 	}
 	setSELinuxHC := &dockercontainer.HostConfig{
 		SecurityOpt: []string{
-			fmt.Sprintf("%s:%s", securitycontext.DockerLabelUser('='), "user"),
-			fmt.Sprintf("%s:%s", securitycontext.DockerLabelRole('='), "role"),
-			fmt.Sprintf("%s:%s", securitycontext.DockerLabelType('='), "type"),
-			fmt.Sprintf("%s:%s", securitycontext.DockerLabelLevel('='), "level"),
+			fmt.Sprintf("%s:%s", selinuxLabelUser('='), "user"),
+			fmt.Sprintf("%s:%s", selinuxLabelRole('='), "role"),
+			fmt.Sprintf("%s:%s", selinuxLabelType('='), "type"),
+			fmt.Sprintf("%s:%s", selinuxLabelLevel('='), "level"),
 		},
 	}
 
@@ -184,10 +183,10 @@ func TestModifyHostConfigAndNamespaceOptionsForContainer(t *testing.T) {
 	}
 	setSELinuxHC := &dockercontainer.HostConfig{
 		SecurityOpt: []string{
-			fmt.Sprintf("%s:%s", securitycontext.DockerLabelUser('='), "user"),
-			fmt.Sprintf("%s:%s", securitycontext.DockerLabelRole('='), "role"),
-			fmt.Sprintf("%s:%s", securitycontext.DockerLabelType('='), "type"),
-			fmt.Sprintf("%s:%s", securitycontext.DockerLabelLevel('='), "level"),
+			fmt.Sprintf("%s:%s", selinuxLabelUser('='), "user"),
+			fmt.Sprintf("%s:%s", selinuxLabelRole('='), "role"),
+			fmt.Sprintf("%s:%s", selinuxLabelType('='), "type"),
+			fmt.Sprintf("%s:%s", selinuxLabelLevel('='), "level"),
 		},
 		IpcMode:     dockercontainer.IpcMode(sandboxNSMode),
 		NetworkMode: dockercontainer.NetworkMode(sandboxNSMode),
@@ -229,25 +228,24 @@ func TestModifyHostConfigAndNamespaceOptionsForContainer(t *testing.T) {
 }
 
 func TestModifySandboxNamespaceOptions(t *testing.T) {
-	set := true
 	cases := []struct {
 		name     string
 		nsOpt    *runtimeapi.NamespaceOption
 		expected *dockercontainer.HostConfig
 	}{
 		{
-			name: "NamespaceOption.HostNetwork",
+			name: "Host Network NamespaceOption",
 			nsOpt: &runtimeapi.NamespaceOption{
-				HostNetwork: set,
+				Network: runtimeapi.NamespaceMode_NODE,
 			},
 			expected: &dockercontainer.HostConfig{
 				NetworkMode: namespaceModeHost,
 			},
 		},
 		{
-			name: "NamespaceOption.HostIpc",
+			name: "Host IPC NamespaceOption",
 			nsOpt: &runtimeapi.NamespaceOption{
-				HostIpc: set,
+				Ipc: runtimeapi.NamespaceMode_NODE,
 			},
 			expected: &dockercontainer.HostConfig{
 				IpcMode:     namespaceModeHost,
@@ -255,9 +253,9 @@ func TestModifySandboxNamespaceOptions(t *testing.T) {
 			},
 		},
 		{
-			name: "NamespaceOption.HostPid",
+			name: "Host PID NamespaceOption",
 			nsOpt: &runtimeapi.NamespaceOption{
-				HostPid: set,
+				Pid: runtimeapi.NamespaceMode_NODE,
 			},
 			expected: &dockercontainer.HostConfig{
 				PidMode:     namespaceModeHost,
@@ -273,7 +271,6 @@ func TestModifySandboxNamespaceOptions(t *testing.T) {
 }
 
 func TestModifyContainerNamespaceOptions(t *testing.T) {
-	set := true
 	sandboxID := "sandbox"
 	sandboxNSMode := fmt.Sprintf("container:%v", sandboxID)
 	cases := []struct {
@@ -282,9 +279,9 @@ func TestModifyContainerNamespaceOptions(t *testing.T) {
 		expected *dockercontainer.HostConfig
 	}{
 		{
-			name: "NamespaceOption.HostNetwork",
+			name: "Host Network NamespaceOption",
 			nsOpt: &runtimeapi.NamespaceOption{
-				HostNetwork: set,
+				Network: runtimeapi.NamespaceMode_NODE,
 			},
 			expected: &dockercontainer.HostConfig{
 				NetworkMode: dockercontainer.NetworkMode(sandboxNSMode),
@@ -294,9 +291,9 @@ func TestModifyContainerNamespaceOptions(t *testing.T) {
 			},
 		},
 		{
-			name: "NamespaceOption.HostIpc",
+			name: "Host IPC NamespaceOption",
 			nsOpt: &runtimeapi.NamespaceOption{
-				HostIpc: set,
+				Ipc: runtimeapi.NamespaceMode_NODE,
 			},
 			expected: &dockercontainer.HostConfig{
 				NetworkMode: dockercontainer.NetworkMode(sandboxNSMode),
@@ -305,9 +302,9 @@ func TestModifyContainerNamespaceOptions(t *testing.T) {
 			},
 		},
 		{
-			name: "NamespaceOption.HostPid",
+			name: "Host PID NamespaceOption",
 			nsOpt: &runtimeapi.NamespaceOption{
-				HostPid: set,
+				Pid: runtimeapi.NamespaceMode_NODE,
 			},
 			expected: &dockercontainer.HostConfig{
 				NetworkMode: dockercontainer.NetworkMode(sandboxNSMode),
@@ -415,10 +412,10 @@ func fullValidHostConfig() *dockercontainer.HostConfig {
 		CapAdd:     []string{"addCapA", "addCapB"},
 		CapDrop:    []string{"dropCapA", "dropCapB"},
 		SecurityOpt: []string{
-			fmt.Sprintf("%s:%s", securitycontext.DockerLabelUser('='), "user"),
-			fmt.Sprintf("%s:%s", securitycontext.DockerLabelRole('='), "role"),
-			fmt.Sprintf("%s:%s", securitycontext.DockerLabelType('='), "type"),
-			fmt.Sprintf("%s:%s", securitycontext.DockerLabelLevel('='), "level"),
+			fmt.Sprintf("%s:%s", selinuxLabelUser('='), "user"),
+			fmt.Sprintf("%s:%s", selinuxLabelRole('='), "role"),
+			fmt.Sprintf("%s:%s", selinuxLabelType('='), "type"),
+			fmt.Sprintf("%s:%s", selinuxLabelLevel('='), "level"),
 		},
 	}
 }

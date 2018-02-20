@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/pborman/uuid"
@@ -30,13 +29,13 @@ import (
 	"k8s.io/apiextensions-apiserver/pkg/cmd/server"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apiserver/pkg/authorization/authorizerfactory"
 	genericapiserver "k8s.io/apiserver/pkg/server"
+	genericapiserveroptions "k8s.io/apiserver/pkg/server/options"
 	"k8s.io/client-go/dynamic"
 )
 
 func DefaultServerConfig() (*extensionsapiserver.Config, error) {
-	port, err := FindFreeLocalPort()
+	listener, port, err := genericapiserveroptions.CreateListener("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
@@ -44,8 +43,11 @@ func DefaultServerConfig() (*extensionsapiserver.Config, error) {
 	options := server.NewCustomResourceDefinitionsServerOptions(os.Stdout, os.Stderr)
 	options.RecommendedOptions.Audit.LogOptions.Path = "-"
 	options.RecommendedOptions.SecureServing.BindPort = port
-	options.RecommendedOptions.Authentication.SkipInClusterLookup = true
+	options.RecommendedOptions.Authentication = nil // disable
+	options.RecommendedOptions.Authorization = nil  // disable
+	options.RecommendedOptions.Admission = nil      // disable
 	options.RecommendedOptions.SecureServing.BindAddress = net.ParseIP("127.0.0.1")
+	options.RecommendedOptions.SecureServing.Listener = listener
 	etcdURL, ok := os.LookupEnv("KUBE_INTEGRATION_ETCD_URL")
 	if !ok {
 		etcdURL = "http://127.0.0.1:2379"
@@ -53,26 +55,15 @@ func DefaultServerConfig() (*extensionsapiserver.Config, error) {
 	options.RecommendedOptions.Etcd.StorageConfig.ServerList = []string{etcdURL}
 	options.RecommendedOptions.Etcd.StorageConfig.Prefix = uuid.New()
 
-	// TODO stop copying this
-	// because there isn't currently a way to disable authentication or authorization from options
-	// explode options.Config here
-	genericConfig := genericapiserver.NewConfig(extensionsapiserver.Codecs)
-	genericConfig.Authenticator = nil
-	genericConfig.Authorizer = authorizerfactory.NewAlwaysAllowAuthorizer()
+	genericConfig := genericapiserver.NewRecommendedConfig(extensionsapiserver.Codecs)
 
 	if err := options.RecommendedOptions.SecureServing.MaybeDefaultWithSelfSignedCerts("localhost", nil, []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
 		return nil, fmt.Errorf("error creating self-signed certificates: %v", err)
 	}
-	if err := options.RecommendedOptions.Etcd.ApplyTo(genericConfig); err != nil {
+	if err := options.RecommendedOptions.ApplyTo(genericConfig, nil); err != nil {
 		return nil, err
 	}
-	if err := options.RecommendedOptions.SecureServing.ApplyTo(genericConfig); err != nil {
-		return nil, err
-	}
-	if err := options.RecommendedOptions.Audit.ApplyTo(genericConfig); err != nil {
-		return nil, err
-	}
-	if err := options.RecommendedOptions.Features.ApplyTo(genericConfig); err != nil {
+	if err := options.APIEnablement.ApplyTo(&genericConfig.Config, extensionsapiserver.DefaultAPIResourceConfigSource(), extensionsapiserver.Registry); err != nil {
 		return nil, err
 	}
 
@@ -85,11 +76,12 @@ func DefaultServerConfig() (*extensionsapiserver.Config, error) {
 		DeleteCollectionWorkers: options.RecommendedOptions.Etcd.DeleteCollectionWorkers,
 	}
 	customResourceDefinitionRESTOptionsGetter.StorageConfig.Codec = unstructured.UnstructuredJSONScheme
-	customResourceDefinitionRESTOptionsGetter.StorageConfig.Copier = extensionsapiserver.UnstructuredCopier{}
 
 	config := &extensionsapiserver.Config{
-		GenericConfig:        genericConfig,
-		CRDRESTOptionsGetter: customResourceDefinitionRESTOptionsGetter,
+		GenericConfig: genericConfig,
+		ExtraConfig: extensionsapiserver.ExtraConfig{
+			CRDRESTOptionsGetter: customResourceDefinitionRESTOptionsGetter,
+		},
 	}
 
 	return config, nil
@@ -153,26 +145,4 @@ func StartDefaultServer() (chan struct{}, clientset.Interface, dynamic.ClientPoo
 	}
 
 	return StartServer(config)
-}
-
-// FindFreeLocalPort returns the number of an available port number on
-// the loopback interface.  Useful for determining the port to launch
-// a server on.  Error handling required - there is a non-zero chance
-// that the returned port number will be bound by another process
-// after this function returns.
-func FindFreeLocalPort() (int, error) {
-	l, err := net.Listen("tcp", ":0")
-	if err != nil {
-		return 0, err
-	}
-	defer l.Close()
-	_, portStr, err := net.SplitHostPort(l.Addr().String())
-	if err != nil {
-		return 0, err
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return 0, err
-	}
-	return port, nil
 }

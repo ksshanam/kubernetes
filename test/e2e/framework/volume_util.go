@@ -44,24 +44,29 @@ import (
 	"strconv"
 	"time"
 
+	"k8s.io/api/core/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
+	clientset "k8s.io/client-go/kubernetes"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 
 	"github.com/golang/glog"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
-// Current supported images for e2e volume testing to be assigned to VolumeTestConfig.serverImage
 const (
-	NfsServerImage       string = "gcr.io/google_containers/volume-nfs:0.8"
-	IscsiServerImage     string = "gcr.io/google_containers/volume-iscsi:0.1"
-	GlusterfsServerImage string = "gcr.io/google_containers/volume-gluster:0.2"
-	CephServerImage      string = "gcr.io/google_containers/volume-ceph:0.1"
-	RbdServerImage       string = "gcr.io/google_containers/volume-rbd:0.1"
-	BusyBoxImage         string = "gcr.io/google_containers/busybox:1.24"
+	Kb  int64 = 1000
+	Mb  int64 = 1000 * Kb
+	Gb  int64 = 1000 * Mb
+	Tb  int64 = 1000 * Gb
+	KiB int64 = 1024
+	MiB int64 = 1024 * KiB
+	GiB int64 = 1024 * MiB
+	TiB int64 = 1024 * GiB
+
+	// Waiting period for volume server (Ceph, ...) to initialize itself.
+	VolumeServerPodStartupSleep = 20 * time.Second
 )
 
 // Configuration of one tests. The test consist of:
@@ -81,12 +86,17 @@ type VolumeTestConfig struct {
 	ServerArgs []string
 	// Volumes needed to be mounted to the server container from the host
 	// map <host (source) path> -> <container (dst.) path>
+	// if <host (source) path> is empty, mount a tmpfs emptydir
 	ServerVolumes map[string]string
 	// Wait for the pod to terminate successfully
 	// False indicates that the pod is long running
 	WaitForCompletion bool
-	// NodeName to run pod on.  Default is any node.
-	NodeName string
+	// ServerNodeName is the spec.nodeName to run server pod on.  Default is any node.
+	ServerNodeName string
+	// ClientNodeName is the spec.nodeName to run client pod on.  Default is any node.
+	ClientNodeName string
+	// NodeSelector to use in pod spec (server, client and injector pods).
+	NodeSelector map[string]string
 }
 
 // VolumeTest contains a volume to mount into a client pod and its
@@ -95,6 +105,115 @@ type VolumeTest struct {
 	Volume          v1.VolumeSource
 	File            string
 	ExpectedContent string
+}
+
+// NFS-specific wrapper for CreateStorageServer.
+func NewNFSServer(cs clientset.Interface, namespace string, args []string) (config VolumeTestConfig, pod *v1.Pod, ip string) {
+	config = VolumeTestConfig{
+		Namespace:     namespace,
+		Prefix:        "nfs",
+		ServerImage:   imageutils.GetE2EImage(imageutils.VolumeNFSServer),
+		ServerPorts:   []int{2049},
+		ServerVolumes: map[string]string{"": "/exports"},
+	}
+	if len(args) > 0 {
+		config.ServerArgs = args
+	}
+	pod, ip = CreateStorageServer(cs, config)
+	return config, pod, ip
+}
+
+// GlusterFS-specific wrapper for CreateStorageServer. Also creates the gluster endpoints object.
+func NewGlusterfsServer(cs clientset.Interface, namespace string) (config VolumeTestConfig, pod *v1.Pod, ip string) {
+	config = VolumeTestConfig{
+		Namespace:   namespace,
+		Prefix:      "gluster",
+		ServerImage: imageutils.GetE2EImage(imageutils.VolumeGlusterServer),
+		ServerPorts: []int{24007, 24008, 49152},
+	}
+	pod, ip = CreateStorageServer(cs, config)
+
+	By("creating Gluster endpoints")
+	endpoints := &v1.Endpoints{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Endpoints",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: config.Prefix + "-server",
+		},
+		Subsets: []v1.EndpointSubset{
+			{
+				Addresses: []v1.EndpointAddress{
+					{
+						IP: ip,
+					},
+				},
+				Ports: []v1.EndpointPort{
+					{
+						Name:     "gluster",
+						Port:     24007,
+						Protocol: v1.ProtocolTCP,
+					},
+				},
+			},
+		},
+	}
+	endpoints, err := cs.CoreV1().Endpoints(namespace).Create(endpoints)
+	Expect(err).NotTo(HaveOccurred(), "failed to create endpoints for Gluster server")
+
+	return config, pod, ip
+}
+
+// iSCSI-specific wrapper for CreateStorageServer.
+func NewISCSIServer(cs clientset.Interface, namespace string) (config VolumeTestConfig, pod *v1.Pod, ip string) {
+	config = VolumeTestConfig{
+		Namespace:   namespace,
+		Prefix:      "iscsi",
+		ServerImage: imageutils.GetE2EImage(imageutils.VolumeISCSIServer),
+		ServerPorts: []int{3260},
+		ServerVolumes: map[string]string{
+			// iSCSI container needs to insert modules from the host
+			"/lib/modules": "/lib/modules",
+		},
+	}
+	pod, ip = CreateStorageServer(cs, config)
+	return config, pod, ip
+}
+
+// CephRBD-specific wrapper for CreateStorageServer.
+func NewRBDServer(cs clientset.Interface, namespace string) (config VolumeTestConfig, pod *v1.Pod, ip string) {
+	config = VolumeTestConfig{
+		Namespace:   namespace,
+		Prefix:      "rbd",
+		ServerImage: imageutils.GetE2EImage(imageutils.VolumeRBDServer),
+		ServerPorts: []int{6789},
+		ServerVolumes: map[string]string{
+			"/lib/modules": "/lib/modules",
+		},
+	}
+	pod, ip = CreateStorageServer(cs, config)
+
+	// Ceph server container needs some time to start. Tests continue working if
+	// this sleep is removed, however kubelet logs (and kubectl describe
+	// <client pod>) would be cluttered with error messages about non-existing
+	// image.
+	Logf("sleeping a bit to give ceph server time to initialize")
+	time.Sleep(VolumeServerPodStartupSleep)
+
+	return config, pod, ip
+}
+
+// Wrapper for StartVolumeServer(). A storage server config is passed in, and a pod pointer
+// and ip address string are returned.
+// Note: Expect() is called so no error is returned.
+func CreateStorageServer(cs clientset.Interface, config VolumeTestConfig) (pod *v1.Pod, ip string) {
+	pod = StartVolumeServer(cs, config)
+	Expect(pod).NotTo(BeNil(), "storage server pod should not be nil")
+	ip = pod.Status.PodIP
+	Expect(len(ip)).NotTo(BeZero(), fmt.Sprintf("pod %s's IP should not be empty", pod.Name))
+	Logf("%s server pod IP address: %s", config.Prefix, ip)
+	return pod, ip
 }
 
 // Starts a container specified by config.serverImage and exports all
@@ -124,8 +243,12 @@ func StartVolumeServer(client clientset.Interface, config VolumeTestConfig) *v1.
 	for src, dst := range config.ServerVolumes {
 		mountName := fmt.Sprintf("path%d", i)
 		volumes[i].Name = mountName
-		volumes[i].VolumeSource.HostPath = &v1.HostPathVolumeSource{
-			Path: src,
+		if src == "" {
+			volumes[i].VolumeSource.EmptyDir = &v1.EmptyDirVolumeSource{}
+		} else {
+			volumes[i].VolumeSource.HostPath = &v1.HostPathVolumeSource{
+				Path: src,
+			}
 		}
 
 		mounts[i].Name = mountName
@@ -172,7 +295,8 @@ func StartVolumeServer(client clientset.Interface, config VolumeTestConfig) *v1.
 			},
 			Volumes:       volumes,
 			RestartPolicy: restartPolicy,
-			NodeName:      config.NodeName,
+			NodeName:      config.ServerNodeName,
+			NodeSelector:  config.NodeSelector,
 		},
 	}
 
@@ -244,6 +368,7 @@ func VolumeTestCleanup(f *Framework, config VolumeTestConfig) {
 // pod.
 func TestVolumeClient(client clientset.Interface, config VolumeTestConfig, fsGroup *int64, tests []VolumeTest) {
 	By(fmt.Sprint("starting ", config.Prefix, " client"))
+	var gracePeriod int64 = 1
 	clientPod := &v1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
@@ -272,12 +397,15 @@ func TestVolumeClient(client clientset.Interface, config VolumeTestConfig, fsGro
 					VolumeMounts: []v1.VolumeMount{},
 				},
 			},
+			TerminationGracePeriodSeconds: &gracePeriod,
 			SecurityContext: &v1.PodSecurityContext{
 				SELinuxOptions: &v1.SELinuxOptions{
 					Level: "s0:c0,c1",
 				},
 			},
-			Volumes: []v1.Volume{},
+			Volumes:      []v1.Volume{},
+			NodeName:     config.ClientNodeName,
+			NodeSelector: config.NodeSelector,
 		},
 	}
 	podsNamespacer := client.CoreV1().Pods(config.Namespace)
@@ -313,7 +441,7 @@ func TestVolumeClient(client clientset.Interface, config VolumeTestConfig, fsGro
 	if fsGroup != nil {
 		By("Checking fsGroup is correct.")
 		_, err = LookForStringInPodExec(config.Namespace, clientPod.Name, []string{"ls", "-ld", "/opt/0"}, strconv.Itoa(int(*fsGroup)), time.Minute)
-		Expect(err).NotTo(HaveOccurred(), "failed: getting the right priviliges in the file %v", int(*fsGroup))
+		Expect(err).NotTo(HaveOccurred(), "failed: getting the right privileges in the file %v", int(*fsGroup))
 	}
 }
 
@@ -339,7 +467,7 @@ func InjectHtml(client clientset.Interface, config VolumeTestConfig, volume v1.V
 			Containers: []v1.Container{
 				{
 					Name:    config.Prefix + "-injector",
-					Image:   "gcr.io/google_containers/busybox:1.24",
+					Image:   BusyBoxImage,
 					Command: []string{"/bin/sh"},
 					Args:    []string{"-c", "echo '" + content + "' > /mnt/index.html && chmod o+rX /mnt /mnt/index.html"},
 					VolumeMounts: []v1.VolumeMount{
@@ -362,6 +490,7 @@ func InjectHtml(client clientset.Interface, config VolumeTestConfig, volume v1.V
 					VolumeSource: volume,
 				},
 			},
+			NodeSelector: config.NodeSelector,
 		},
 	}
 
@@ -373,4 +502,16 @@ func InjectHtml(client clientset.Interface, config VolumeTestConfig, volume v1.V
 	ExpectNoError(err, "Failed to create injector pod: %v", err)
 	err = WaitForPodSuccessInNamespace(client, injectPod.Name, injectPod.Namespace)
 	Expect(err).NotTo(HaveOccurred())
+}
+
+func CreateGCEVolume() (*v1.PersistentVolumeSource, string) {
+	diskName, err := CreatePDWithRetry()
+	ExpectNoError(err)
+	return &v1.PersistentVolumeSource{
+		GCEPersistentDisk: &v1.GCEPersistentDiskVolumeSource{
+			PDName:   diskName,
+			FSType:   "ext3",
+			ReadOnly: false,
+		},
+	}, diskName
 }

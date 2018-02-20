@@ -1,7 +1,5 @@
 package(default_visibility = ["//visibility:public"])
 
-licenses(["notice"])
-
 load(
     "@io_bazel_rules_go//go:def.bzl",
     "go_library",
@@ -10,8 +8,8 @@ load(
 go_library(
     name = "go_default_library",
     srcs = ["services.go"],
-    tags = ["automanaged"],
-    deps = ["//pkg/kubelet/apis/cri/v1alpha1/runtime:go_default_library"],
+    importpath = "k8s.io/kubernetes/pkg/kubelet/apis/cri",
+    deps = ["//pkg/kubelet/apis/cri/runtime/v1alpha2:go_default_library"],
 )
 
 filegroup(
@@ -25,8 +23,8 @@ filegroup(
     name = "all-srcs",
     srcs = [
         ":package-srcs",
+        "//pkg/kubelet/apis/cri/runtime/v1alpha2:all-srcs",
         "//pkg/kubelet/apis/cri/testing:all-srcs",
-        "//pkg/kubelet/apis/cri/v1alpha1/runtime:all-srcs",
     ],
     tags = ["automanaged"],
 )
